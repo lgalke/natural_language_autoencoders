@@ -22,7 +22,7 @@ import torch
 from tqdm import tqdm
 
 from nla.datagen._common import add_storage_args, make_storage
-from nla.hrm.mimir import HrmStreamCapture, context_marked, load_mimir, render_and_encode_batch
+from nla.hrm.mimir import HrmStreamCapture, context_marked, load_mimir, render_and_encode_batch, render_prompts
 from nla.hrm.sidecar import HrmDatasetMeta, HrmExtractionMeta, write_sidecar
 
 # Skip the first few template tokens (<bos><|turn>user\n) — not meaningful
@@ -74,7 +74,13 @@ def main() -> None:
     p.add_argument("--corpus", required=True, help="JSONL from build_prompt_corpus.py")
     p.add_argument("--base-model", default=None, help="defaults to nla.hrm.mimir.DEFAULT_MIMIR")
     p.add_argument("--positions-per-prompt", type=int, default=6)
-    p.add_argument("--batch-size", type=int, default=8)
+    p.add_argument("--batch-size", type=int, default=8, help="max prompts per batch")
+    p.add_argument("--max-batch-tokens", type=int, default=16384,
+                    help="cap on batch_size x padded_len; prompts are length-sorted so long "
+                         "ones get small batches (attention memory is quadratic in length)")
+    p.add_argument("--max-prompt-tokens", type=int, default=2048,
+                    help="skip prompts whose rendered length exceeds this (never truncated: "
+                         "cutting the chat template would change what the model sees)")
     p.add_argument("--device", default="cpu")
     p.add_argument("--dtype", choices=["float32", "bfloat16"], default="bfloat16")
     p.add_argument("--seed", type=int, default=42)
@@ -103,14 +109,29 @@ def main() -> None:
         corpus_rows = corpus_rows[: args.limit]
     assert corpus_rows, f"no rows read from {args.corpus}"
 
+    # Length-sort + token-budget batching (row order in the parquet doesn't matter;
+    # positions are keyed on (seed, doc_id), not batch composition).
+    lens = [len(t) for t in (tokenizer(render_prompts(tokenizer, [c["prompt"] for c in corpus_rows]),
+                                        add_special_tokens=False)["input_ids"])]
+    keep = [i for i, n in enumerate(lens) if n <= args.max_prompt_tokens]
+    print(f"skipping {len(lens) - len(keep)}/{len(lens)} prompts longer than {args.max_prompt_tokens} tokens")
+    keep.sort(key=lambda i: lens[i])
+    batches: list[list[dict]] = []
+    cur: list[int] = []
+    for i in keep:
+        if cur and (len(cur) >= args.batch_size or (len(cur) + 1) * lens[i] > args.max_batch_tokens):
+            batches.append([corpus_rows[j] for j in cur])
+            cur = []
+        cur.append(i)
+    if cur:
+        batches.append([corpus_rows[j] for j in cur])
     schema = _schema(d_model)
     storage.ensure_parent(args.output)
     row_count = 0
     n_prompts_skipped = 0
 
     with pq.ParquetWriter(storage.open_write(args.output), schema) as writer:
-        for start in tqdm(range(0, len(corpus_rows), args.batch_size), desc="batches"):
-            chunk = corpus_rows[start : start + args.batch_size]
+        for chunk in tqdm(batches, desc="batches"):
             prompts = [c["prompt"] for c in chunk]
             batch = render_and_encode_batch(tokenizer, prompts, device=args.device)
 
@@ -121,6 +142,9 @@ def main() -> None:
                         attention_mask=batch.attention_mask,
                         token_type_ids=batch.token_type_ids,
                         use_cache=False,
+                        # We only need the hooked hidden states — without this the
+                        # LM head materializes [B, S, vocab=262144] logits (OOM).
+                        logits_to_keep=1,
                     )
             cap.verify_call_counts()
             # bf16 forward: sum identity holds only approximately (rounding
@@ -174,7 +198,7 @@ def main() -> None:
         created_by="nla.hrm.stage0_hrm",
     )
     write_sidecar(storage, args.output, meta)
-    print(f"wrote {row_count} rows ({len(corpus_rows) - n_prompts_skipped}/{len(corpus_rows)} prompts) → {args.output}")
+    print(f"wrote {row_count} rows ({len(keep) - n_prompts_skipped}/{len(lens)} prompts) → {args.output}")
     if n_prompts_skipped:
         print(f"  skipped {n_prompts_skipped} prompts shorter than {_MIN_POSITION + 2} tokens")
     print(f"sidecar → {args.output}.nla_meta.yaml")

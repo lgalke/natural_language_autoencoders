@@ -57,6 +57,19 @@ class RenderedBatch:
     rendered_texts: list[str]
 
 
+def render_prompts(tokenizer, prompts: list[str]) -> list[str]:
+    """Single-turn Mimir chat rendering (text only, BOS included as text)."""
+    return [
+        tokenizer.apply_chat_template(
+            [{"role": "user", "content": p}],
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )
+        for p in prompts
+    ]
+
+
 def render_and_encode_batch(tokenizer, prompts: list[str], device: str = "cpu") -> RenderedBatch:
     """Render each prompt as a single-turn Mimir chat prompt and batch-encode it.
 
@@ -71,15 +84,7 @@ def render_and_encode_batch(tokenizer, prompts: list[str], device: str = "cpu") 
     text; re-tokenizing with the default would double it (prompt_templates.md
     "Double BOS on re-encode").
     """
-    texts = [
-        tokenizer.apply_chat_template(
-            [{"role": "user", "content": p}],
-            tokenize=False,
-            add_generation_prompt=True,
-            enable_thinking=False,
-        )
-        for p in prompts
-    ]
+    texts = render_prompts(tokenizer, prompts)
     enc = tokenizer(texts, return_tensors="pt", padding=True, add_special_tokens=False)
     input_ids = enc["input_ids"].to(device)
     attention_mask = enc["attention_mask"].to(device)
