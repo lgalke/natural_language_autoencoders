@@ -33,7 +33,7 @@ from datasets import load_dataset
 # environment via repeated `--source`.
 DEFAULT_SOURCES = [
     "gsm-symbolic=apple/GSM-Symbolic:main:test:question",
-    "proofwriter=voidful/ProofWriter::validation:question",
+    # "proofwriter=voidful/ProofWriter::validation:question",
     "bbh=lukaemon/bbh:causal_judgement:test:input",
     "musr=TAUR-Lab/MuSR::murder_mysteries:context",
     "da_instruct=danish-foundation-models/danish-dynaword::train:text",
