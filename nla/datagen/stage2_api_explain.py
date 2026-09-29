@@ -101,6 +101,136 @@ def _extract_and_clean(raw: str, pattern: str) -> str | None:
     return "\n\n".join(cleaned)
 
 
+def explain_table(
+    table: pa.Table,
+    *,
+    output_path: str,
+    storage,
+    provider: CompletionProvider,
+    text_column: str,
+    instruction_template: str,
+    response_extract_pattern: str,
+    samples_per_row: int,
+    chunk_size: int,
+    cache: dict,
+) -> tuple[int, int]:
+    """Row-processing + crash-resumable chunk loop, factored out of `main()` so
+    it's reusable against ANY sidecar schema (the sidecar read/write on either
+    side is schema-specific — see `nla/hrm/explain.py`, which calls this with
+    its own `nla.hrm.sidecar` read/write instead of this module's
+    `nla.datagen.sidecar`). Returns (row_count, dropped_count); writes the
+    output parquet (with api_explanation[_i] column(s) appended) as a side
+    effect — caller writes the sidecar after this returns.
+    """
+    n = samples_per_row
+    expl_fields = [pa.field("api_explanation", pa.string())] if n == 1 else [
+        pa.field(f"api_explanation_{i}", pa.string()) for i in range(n)
+    ]
+    out_schema = table.schema
+    for f in expl_fields:
+        out_schema = out_schema.append(f)
+    storage.ensure_parent(output_path)
+
+    chunks_dir = Path(f"{output_path}.chunks")
+    chunks_dir.mkdir(parents=True, exist_ok=True)
+
+    def _clean_or_none(raw: str | None) -> str | None:
+        if raw is None:
+            return None
+        assert isinstance(raw, str) and raw, (
+            f"provider returned bad completion: {raw!r}. "
+            f"CompletionProvider.complete() must return str or None."
+        )
+        cleaned = _extract_and_clean(raw, response_extract_pattern)
+        if cleaned is not None and cleaned.count("\n\n") + 1 < _MIN_FEATURES:
+            return None
+        return cleaned
+
+    def _process_chunk_single(chunk: pa.Table) -> tuple[pa.Table, int]:
+        texts = chunk.column(text_column).to_pylist()
+        cached_expls = [lookup(cache, t) for t in texts]
+        miss_idx = [i for i, e in enumerate(cached_expls) if e is None]
+        miss_prompts = [instruction_template.format(text=texts[i]) for i in miss_idx]
+        raw_completions = provider.complete(miss_prompts) if miss_prompts else []
+        assert len(raw_completions) == len(miss_prompts), (
+            f"provider returned {len(raw_completions)} completions for {len(miss_prompts)} prompts — "
+            f"length mismatch violates the CompletionProvider contract"
+        )
+        miss_cleaned = {j: _clean_or_none(raw) for j, raw in zip(miss_idx, raw_completions, strict=True)}
+
+        dropped = 0
+        keep_mask: list[bool] = []
+        explanations: list[str] = []
+        for i, hit in enumerate(cached_expls):
+            cleaned = hit if hit is not None else miss_cleaned[i]
+            if cleaned is None:
+                dropped += 1
+                keep_mask.append(False)
+                continue
+            keep_mask.append(True)
+            explanations.append(cleaned)
+        if not all(keep_mask):
+            chunk = chunk.filter(pa.array(keep_mask, type=pa.bool_()))
+        return chunk.append_column("api_explanation", pa.array(explanations, type=pa.string())), dropped
+
+    def _process_chunk_multi(chunk: pa.Table) -> tuple[pa.Table, int]:
+        # No cache path here (caller asserts incompatible) — every row gets
+        # `n` independent temperature-sampled completions in one batched call,
+        # laid out [row0_sample0, row0_sample1, ..., row1_sample0, ...].
+        texts = chunk.column(text_column).to_pylist()
+        prompts = [instruction_template.format(text=t) for t in texts for _ in range(n)]
+        raw_completions = provider.complete(prompts) if prompts else []
+        assert len(raw_completions) == len(prompts), (
+            f"provider returned {len(raw_completions)} completions for {len(prompts)} prompts — "
+            f"length mismatch violates the CompletionProvider contract"
+        )
+        dropped = 0
+        keep_mask: list[bool] = []
+        per_field: list[list[str]] = [[] for _ in range(n)]
+        for i in range(len(texts)):
+            cleaned = [_clean_or_none(raw_completions[i * n + k]) for k in range(n)]
+            if any(c is None for c in cleaned):
+                dropped += 1
+                keep_mask.append(False)
+                continue
+            keep_mask.append(True)
+            for k in range(n):
+                per_field[k].append(cleaned[k])  # type: ignore[arg-type]
+        if not all(keep_mask):
+            chunk = chunk.filter(pa.array(keep_mask, type=pa.bool_()))
+        for k in range(n):
+            chunk = chunk.append_column(f"api_explanation_{k}", pa.array(per_field[k], type=pa.string()))
+        return chunk, dropped
+
+    _process_chunk = _process_chunk_single if n == 1 else _process_chunk_multi
+
+    dropped_count = 0
+    chunk_paths: list[Path] = []
+    chunk_starts = list(range(0, table.num_rows, chunk_size))
+    skipped = 0
+    for chunk_start in tqdm(chunk_starts, desc="chunks"):
+        chunk_path = chunks_dir / f"chunk_{chunk_start:08d}.parquet"
+        chunk_paths.append(chunk_path)
+        if chunk_path.exists():
+            skipped += 1
+            continue
+        chunk_out, dropped = _process_chunk(table.slice(chunk_start, chunk_size))
+        dropped_count += dropped
+        tmp = chunk_path.with_suffix(".tmp")
+        pq.write_table(chunk_out, tmp)
+        tmp.rename(chunk_path)
+    if skipped:
+        print(f"  resumed: skipped {skipped}/{len(chunk_starts)} already-completed chunks")
+
+    row_count = 0
+    with pq.ParquetWriter(storage.open_write(output_path), out_schema) as writer:
+        for p in chunk_paths:
+            t = pq.read_table(p)
+            writer.write_table(t)
+            row_count += t.num_rows
+    return row_count, dropped_count
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--input", required=True, help="SL subset parquet from stage1")
@@ -114,6 +244,18 @@ def main() -> None:
                         "Default requires both <analysis> and </analysis> (truncated "
                         "responses are dropped). MUST match the tag your instruction asks for.")
     p.add_argument("--chunk-size", type=int, default=512, help="rows per provider.complete() call")
+    p.add_argument("--text-column", default="detokenized_text_truncated",
+                   help="input column to fill {text} with — e.g. 'context_marked' for the "
+                        "HRM pipeline's ⟦-marked⟧ prompt rows (nla/hrm/stage0_hrm.py)")
+    p.add_argument("--samples-per-row", type=int, default=1,
+                   help="independent completions per row, written as api_explanation_0.."
+                        "api_explanation_{N-1} columns (temperature-sampled, so N>1 gives N "
+                        "genuinely different explanations of the same input — used by the HRM "
+                        "pipeline to fill the L and H SFT fields independently, see "
+                        "nla/hrm/build.py). N=1 is the original single-column behavior. "
+                        "Incompatible with --cache-from (a cache entry is one explanation per "
+                        "text, not N independent ones) and rows are DROPPED (not padded) if "
+                        "fewer than N completions survive extraction.")
     p.add_argument("--cache-from", action="append", default=[],
                    help="path(s) to existing *_explained.parquet to reuse explanations from "
                         "(joins on detokenized_text_truncated — same tokenizer + corpus slice "
@@ -126,6 +268,11 @@ def main() -> None:
     args = p.parse_args()
 
     assert "{text}" in args.instruction_template, "instruction-template must contain {text} placeholder"
+    assert args.samples_per_row >= 1, f"--samples-per-row must be >=1, got {args.samples_per_row}"
+    assert args.samples_per_row == 1 or not args.cache_from, (
+        "--cache-from is incompatible with --samples-per-row>1 — a cache entry is one cached "
+        "explanation per text, not N independent samples. Drop --cache-from or use N=1."
+    )
 
     storage = make_storage(args)
     in_meta = read_sidecar(storage, args.input)
@@ -133,80 +280,18 @@ def main() -> None:
     cache = load_explanation_cache(args.cache_from, args.cache_storage_cls) if args.cache_from else {}
 
     table = pq.read_table(storage.open_read(args.input))
-    out_schema = table.schema.append(pa.field("api_explanation", pa.string()))
-    storage.ensure_parent(args.output)
-
-    # Per-chunk files for crash-safe resumption. Local-only (not via storage
-    # backend — these are temp files). Existing chunk files are skipped on
-    # restart; the API is never called twice for the same chunk.
-    chunks_dir = Path(f"{args.output}.chunks")
-    chunks_dir.mkdir(parents=True, exist_ok=True)
-
-    def _process_chunk(chunk: pa.Table) -> tuple[pa.Table, int]:
-        texts = chunk.column("detokenized_text_truncated").to_pylist()
-        cached_expls = [lookup(cache, t) for t in texts]
-        miss_idx = [i for i, e in enumerate(cached_expls) if e is None]
-        miss_prompts = [args.instruction_template.format(text=texts[i]) for i in miss_idx]
-        raw_completions = provider.complete(miss_prompts) if miss_prompts else []
-        assert len(raw_completions) == len(miss_prompts), (
-            f"provider returned {len(raw_completions)} completions for {len(miss_prompts)} prompts — "
-            f"length mismatch violates the CompletionProvider contract"
-        )
-        miss_cleaned: dict[int, str | None] = {}
-        for j, raw in zip(miss_idx, raw_completions, strict=True):
-            # None = provider gave up on this prompt after exhausting retries.
-            # Drop it (same path as failed-extract-pattern below).
-            if raw is None:
-                miss_cleaned[j] = None
-                continue
-            assert isinstance(raw, str) and raw, (
-                f"provider returned bad completion at miss index {j}: {raw!r}. "
-                f"CompletionProvider.complete() must return str or None."
-            )
-            miss_cleaned[j] = _extract_and_clean(raw, args.response_extract_pattern)
-
-        dropped = 0
-        keep_mask: list[bool] = []
-        explanations: list[str] = []
-        for i, hit in enumerate(cached_expls):
-            cleaned = hit if hit is not None else miss_cleaned[i]
-            if cleaned is None or cleaned.count("\n\n") + 1 < _MIN_FEATURES:
-                dropped += 1
-                keep_mask.append(False)
-                continue
-            keep_mask.append(True)
-            explanations.append(cleaned)
-        if not all(keep_mask):
-            chunk = chunk.filter(pa.array(keep_mask, type=pa.bool_()))
-        return chunk.append_column("api_explanation", pa.array(explanations, type=pa.string())), dropped
-
-    dropped_count = 0
-    chunk_paths: list[Path] = []
-    chunk_starts = list(range(0, table.num_rows, args.chunk_size))
-    skipped = 0
-    for chunk_start in tqdm(chunk_starts, desc="chunks"):
-        chunk_path = chunks_dir / f"chunk_{chunk_start:08d}.parquet"
-        chunk_paths.append(chunk_path)
-        if chunk_path.exists():
-            skipped += 1
-            continue
-        chunk_out, dropped = _process_chunk(table.slice(chunk_start, args.chunk_size))
-        dropped_count += dropped
-        # tmp+rename: no partial chunk file if the process dies mid-write
-        tmp = chunk_path.with_suffix(".tmp")
-        pq.write_table(chunk_out, tmp)
-        tmp.rename(chunk_path)
-    if skipped:
-        print(f"  resumed: skipped {skipped}/{len(chunk_starts)} already-completed chunks")
-
-    # Merge chunks into final output via ParquetWriter (stream, not concat —
-    # 100k-scale tables don't all fit in memory at once).
-    row_count = 0
-    with pq.ParquetWriter(storage.open_write(args.output), out_schema) as writer:
-        for p in chunk_paths:
-            t = pq.read_table(p)
-            writer.write_table(t)
-            row_count += t.num_rows
+    row_count, dropped_count = explain_table(
+        table,
+        output_path=args.output,
+        storage=storage,
+        provider=provider,
+        text_column=args.text_column,
+        instruction_template=args.instruction_template,
+        response_extract_pattern=args.response_extract_pattern,
+        samples_per_row=args.samples_per_row,
+        chunk_size=args.chunk_size,
+        cache=cache,
+    )
 
     # Record provider config in sidecar. Pull model/max_tokens/temperature via
     # getattr — providers aren't required to have these, but the default does.

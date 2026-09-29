@@ -26,6 +26,18 @@ dependencies = [
 #   sglang   : pip install "sglang[all]>=0.5.6", then bash patches/apply_sglang_patches.sh /path/to/sglang
 #   megatron : optional, only for the Megatron backend (70B+)
 
+[project.optional-dependencies]
+# nla/hrm/ — the HRM (Mimir) verbalizer extension, see docs/hrm.md. Does NOT
+# need miles/sglang (its own single-process trainer). `transformers>=5.13` is
+# a HARD requirement here (native `hrm_text` support, not trust_remote_code) —
+# not bumped in the base `dependencies` above since that could conflict with
+# Miles/SGLang's own pinned transformers version for the rest of this repo.
+hrm = [
+    "transformers>=5.13",
+    "peft>=0.19",
+    "accelerate",
+]
+
 [project.urls]
 Homepage = "https://github.com/kitft/natural_language_autoencoders"
 
@@ -33,7 +45,7 @@ Homepage = "https://github.com/kitft/natural_language_autoencoders"
 include = ["nla*"]
 
 [tool.setuptools.package-data]
-nla = ["miles_patches/*", "datagen/*.yaml"]
+nla = ["miles_patches/*", "datagen/*.yaml", "hrm/*.yaml"]
 
 [tool.ruff]
 line-length = 119

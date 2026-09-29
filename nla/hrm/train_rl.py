@@ -1,0 +1,314 @@
+"""RL: a self-written GRPO-style loop training the `av` LoRA adapter + the
+per-stream injection adapters (policy) SIMULTANEOUSLY with the `ar` LoRA
+adapter + ReconHeads (online critic), on the same rollouts each step — the
+AR is the reward model (reward = -reconstruction loss), so it must keep
+learning alongside the AV or the AV would game a frozen, increasingly-stale
+critic (see docs/hrm.md and the original NLA's rl.sh).
+
+Per step:
+  1. Sample B activation rows x G rollouts each (temperature=1, greedy-free).
+  2. Score EACH rollout's parsed (L, H) fields with the CURRENT ar+heads
+     (no_grad) -> reward = -loss (or -log(loss)); malformed -> failed_reward.
+  3. Group-normalize advantages within each row's G rollouts (GRPO).
+  4. Policy step: token-mean REINFORCE + advantage, plus a k2-KL penalty
+     toward the frozen post-SFT `av_ref` snapshot. Updates av LoRA + inj_L/H.
+  5. AR step: a fresh (WITH grad) AR forward + recon_loss on the well-formed
+     rollouts from this batch -> supervised update of ar LoRA + heads. This
+     is a SEPARATE forward pass from step 2's (no_grad) one — different
+     optimizers, no shared graph.
+  6. Every --eval-every steps: reconstruction FVE on a held-out parquet
+     (cheap; the heavier Mimir patch-back judge is `judge.py`, run
+     separately/periodically, never inside this loop — see docs/hrm.md).
+
+Mimir itself is NEVER loaded here — this script only touches the verbalizer
+and the RAW gold z_L/z_H already extracted into the RL parquet.
+"""
+
+import argparse
+import re
+from pathlib import Path
+
+import pyarrow.parquet as pq
+import torch
+from tqdm import tqdm
+
+from nla.datagen.storage import LocalStorage
+from nla.hrm.build import _INJECT_H_PLACEHOLDER, _INJECT_L_PLACEHOLDER
+from nla.hrm.model import (
+    DEFAULT_VERBALIZER, add_frozen_reference_adapter, build_inputs_embeds,
+    load_rl_checkpoint, load_verbalizer, save_extra_modules,
+)
+from nla.hrm.recon import ReconWeights, failed_reward, loss_to_reward, parse_fields, recon_loss
+from nla.hrm.sidecar import HrmDatasetMeta, read_sidecar
+
+_D_MIMIR = 1536
+_CJK_RE = re.compile(r"[㈀-㏿一-鿿]")
+
+
+def _load_rl_rows(parquet_path: str) -> tuple[list[dict], HrmDatasetMeta]:
+    t = pq.read_table(parquet_path, columns=["prompt", "z_L", "z_H"])
+    return t.to_pylist(), read_sidecar(LocalStorage(), parquet_path)
+
+
+def _extra_content(row: dict, inj_l_char: str, inj_h_char: str) -> str:
+    return row["prompt"][0]["content"].replace(_INJECT_L_PLACEHOLDER, inj_l_char).replace(_INJECT_H_PLACEHOLDER, inj_h_char)
+
+
+@torch.no_grad()
+def _generate_batch(model, tokenizer, rows, inj_l_char, inj_h_char, inj_L, inj_H, ids_meta, device,
+                     group_size: int, max_new_tokens: int, temperature: float):
+    """rows: B activation rows. Returns per-(row,sample) generated text + the
+    full token sequence (for logp scoring) + prompt length S (constant across
+    the batch thanks to left-padding)."""
+    contents = [_extra_content(r, inj_l_char, inj_h_char) for r in rows for _ in range(group_size)]
+    tokenizer.padding_side = "left"
+    enc = tokenizer.apply_chat_template(
+        [[{"role": "user", "content": c}] for c in contents],
+        tokenize=True, add_generation_prompt=True, return_tensors="pt", return_dict=True, padding=True,
+    )
+    input_ids = enc["input_ids"].to(device)
+    attn = enc["attention_mask"].to(device)
+    S = input_ids.shape[1]
+
+    z_L = torch.tensor([r["z_L"] for r in rows for _ in range(group_size)], dtype=torch.float32, device=device)
+    z_H = torch.tensor([r["z_H"] for r in rows for _ in range(group_size)], dtype=torch.float32, device=device)
+    embeds = build_inputs_embeds(model, input_ids, z_L, z_H, inj_L, inj_H, *ids_meta)
+
+    model.set_adapter("av")
+    out_ids = model.generate(
+        inputs_embeds=embeds, attention_mask=attn, max_new_tokens=max_new_tokens,
+        do_sample=True, temperature=temperature, top_p=1.0, pad_token_id=tokenizer.pad_token_id,
+    )
+    # generate() with inputs_embeds returns ONLY the newly generated tokens
+    # (it never sees input_ids to prepend) — reconstruct the full sequence
+    # ourselves for teacher-forced scoring.
+    full_ids = torch.cat([input_ids, out_ids], dim=1)
+    new_attn = (out_ids != tokenizer.pad_token_id).long()
+    full_attn = torch.cat([attn, new_attn], dim=1)
+    texts = tokenizer.batch_decode(out_ids, skip_special_tokens=True)
+    return full_ids, full_attn, S, texts, z_L, z_H
+
+
+def _critic_hidden(model, tokenizer, texts: list[str], device: str) -> torch.Tensor:
+    model.set_adapter("ar")
+    enc = tokenizer(texts, return_tensors="pt", padding=True, add_special_tokens=False,
+                     truncation=True, max_length=512)
+    ids, attn = enc["input_ids"].to(device), enc["attention_mask"].to(device)
+    out = model(input_ids=ids, attention_mask=attn, output_hidden_states=True)
+    lengths = attn.sum(dim=1) - 1
+    return out.hidden_states[-1][torch.arange(ids.shape[0]), lengths]
+
+
+def compute_rewards(model, tokenizer, heads, critic_template, texts, z_L, z_H, weights, device, log_reward: bool):
+    """no_grad AR forward -> reward per rollout (float list) + parsed fields
+    (None for malformed) — the parsed fields are reused by the AR update step
+    so its texts aren't re-tokenized twice for nothing."""
+    parsed = [parse_fields(t) for t in texts]
+    ok_idx = [i for i, p in enumerate(parsed) if p is not None]
+    computed: dict[int, float] = {}
+    if ok_idx:
+        l_texts = [critic_template.format(explanation=parsed[i][0]) for i in ok_idx]
+        h_texts = [critic_template.format(explanation=parsed[i][1]) for i in ok_idx]
+        with torch.no_grad():
+            h_l = _critic_hidden(model, tokenizer, l_texts, device)
+            h_h = _critic_hidden(model, tokenizer, h_texts, device)
+            zL_hat, zH_hat = heads.forward_L(h_l), heads.forward_H(h_h)
+            gold_L, gold_H = z_L[ok_idx], z_H[ok_idx]
+            for j, i in enumerate(ok_idx):
+                loss = recon_loss(zL_hat[j : j + 1], zH_hat[j : j + 1], gold_L[j : j + 1], gold_H[j : j + 1], weights)
+                computed[i] = loss_to_reward(loss.total, log_reward=log_reward)
+    fallback = failed_reward(weights, log_reward=log_reward)
+    rewards: list[float] = [computed[i] if i in computed else fallback for i in range(len(texts))]
+    return rewards, parsed
+
+
+def ar_update_step(model, tokenizer, heads, heads_optim, critic_template, parsed, z_L, z_H, weights, device):
+    ok_idx = [i for i, p in enumerate(parsed) if p is not None]
+    if not ok_idx:
+        return None
+    l_texts = [critic_template.format(explanation=parsed[i][0]) for i in ok_idx]
+    h_texts = [critic_template.format(explanation=parsed[i][1]) for i in ok_idx]
+    h_l = _critic_hidden(model, tokenizer, l_texts, device)
+    h_h = _critic_hidden(model, tokenizer, h_texts, device)
+    zL_hat, zH_hat = heads.forward_L(h_l), heads.forward_H(h_h)
+    loss = recon_loss(zL_hat, zH_hat, z_L[ok_idx], z_H[ok_idx], weights)
+    heads_optim.zero_grad()
+    loss.total.backward()
+    heads_optim.step()
+    return loss
+
+
+def policy_step(model, full_ids, full_attn, S, advantages, inj_L, inj_H, ids_meta, z_L, z_H, policy_optim,
+                 kl_beta: float, device):
+    embeds = build_inputs_embeds(model, full_ids, z_L, z_H, inj_L, inj_H, *ids_meta)
+    model.set_adapter("av")
+    logits_policy = model(inputs_embeds=embeds, attention_mask=full_attn).logits
+    with torch.no_grad():
+        model.set_adapter("av_ref")
+        logits_ref = model(inputs_embeds=embeds, attention_mask=full_attn).logits
+    model.set_adapter("av")
+
+    logp_policy = torch.log_softmax(logits_policy[:, :-1].float(), dim=-1)
+    logp_policy = logp_policy.gather(-1, full_ids[:, 1:].unsqueeze(-1)).squeeze(-1)
+    logp_ref = torch.log_softmax(logits_ref[:, :-1].float(), dim=-1)
+    logp_ref = logp_ref.gather(-1, full_ids[:, 1:].unsqueeze(-1)).squeeze(-1)
+
+    response_mask = full_attn[:, 1:].clone().float()
+    response_mask[:, : S - 1] = 0.0  # only score response-token predictions
+    denom = response_mask.sum(-1).clamp_min(1.0)
+
+    token_logratio = logp_policy - logp_ref.detach()
+    kl_per_sample = (0.5 * token_logratio.pow(2) * response_mask).sum(-1) / denom
+    resp_logp_mean = (logp_policy * response_mask).sum(-1) / denom
+
+    pg_loss = -(advantages.to(device) * resp_logp_mean).mean()
+    kl_loss = kl_per_sample.mean()
+    loss = pg_loss + kl_beta * kl_loss
+
+    policy_optim.zero_grad()
+    loss.backward()
+    policy_optim.step()
+    return pg_loss.item(), kl_loss.item()
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--rl-parquet", required=True)
+    p.add_argument("--eval-parquet", default=None)
+    p.add_argument("--av-sft-ckpt", required=True, help="train_av_sft.py's --output dir (contains av/adapter_config.json)")
+    p.add_argument("--ar-sft-ckpt", required=True, help="train_ar_sft.py's --output dir (contains ar/adapter_config.json)")
+    p.add_argument("--verbalizer-model", default=None)
+    p.add_argument("--device", default="cpu")
+    p.add_argument("--dtype", choices=["float32", "bfloat16"], default="float32")
+    p.add_argument("--batch-size", type=int, default=8, help="B activation rows per step")
+    p.add_argument("--group-size", type=int, default=8, help="G rollouts per row (GRPO group)")
+    p.add_argument("--max-new-tokens", type=int, default=300)
+    p.add_argument("--temperature", type=float, default=1.0)
+    p.add_argument("--steps", type=int, default=200)
+    p.add_argument("--policy-lr", type=float, default=1e-5)
+    p.add_argument("--ar-lr", type=float, default=1e-4)
+    p.add_argument("--kl-beta", type=float, default=0.01)
+    p.add_argument("--w-sum", type=float, default=1.0)
+    p.add_argument("--w-comp", type=float, default=0.25)
+    p.add_argument("--log-reward", action="store_true", help="reward = -log(loss) instead of -loss")
+    p.add_argument("--eval-every", type=int, default=20)
+    p.add_argument("--save-every", type=int, default=50)
+    p.add_argument("--sanity", action="store_true", help="run the real-vs-shuffled-vectors check before training")
+    p.add_argument("--output", required=True)
+    args = p.parse_args()
+
+    verbalizer_model = args.verbalizer_model or DEFAULT_VERBALIZER
+    dtype = {"float32": torch.float32, "bfloat16": torch.bfloat16}[args.dtype]
+    weights = ReconWeights(w_sum=args.w_sum, w_comp=args.w_comp)
+
+    model, tokenizer = load_verbalizer(verbalizer_model, device=args.device, torch_dtype=dtype)
+    d_verb = model.config.hidden_size
+    rows, meta = _load_rl_rows(args.rl_parquet)
+    tm = meta.tokens
+    assert tm is not None
+    inj_l_char, inj_h_char = tm.injection_char_L, tm.injection_char_H
+    ids_meta = (tm.injection_token_id_L, tm.injection_left_neighbor_id_L, tm.injection_right_neighbor_id_L,
+                tm.injection_token_id_H, tm.injection_left_neighbor_id_H, tm.injection_right_neighbor_id_H)
+    critic_template = meta.prompt_templates["critic"]
+
+    inj_L, inj_H, heads = load_rl_checkpoint(model, args.av_sft_ckpt, args.ar_sft_ckpt, _D_MIMIR, d_verb, args.device)
+    add_frozen_reference_adapter(model, source_adapter="av", ref_name="av_ref")
+    print(f"[train_rl] adapters: {list(model.peft_config.keys())}")
+
+    for name, param in model.named_parameters():
+        param.requires_grad_((".av." in name or ".ar." in name) and ".av_ref." not in name)
+    policy_params = [pr for n, pr in model.named_parameters() if pr.requires_grad and ".av." in n]
+    policy_params += list(inj_L.parameters()) + list(inj_H.parameters())
+    ar_params = [pr for n, pr in model.named_parameters() if pr.requires_grad and ".ar." in n] + list(heads.parameters())
+    policy_optim = torch.optim.AdamW(policy_params, lr=args.policy_lr)
+    ar_optim = torch.optim.AdamW(ar_params, lr=args.ar_lr)
+    print(f"[train_rl] policy params: {sum(p.numel() for p in policy_params):,}  "
+          f"ar params: {sum(p.numel() for p in ar_params):,}")
+
+    if args.sanity:
+        _run_sanity_check(model, tokenizer, rows[: args.batch_size], inj_l_char, inj_h_char, inj_L, inj_H,
+                            ids_meta, heads, critic_template, weights, args.device, args.log_reward)
+
+    step = 0
+    with tqdm(total=args.steps) as pbar:
+        while step < args.steps:
+            batch_rows = [rows[i % len(rows)] for i in range(step * args.batch_size, (step + 1) * args.batch_size)]
+            full_ids, full_attn, S, texts, z_L, z_H = _generate_batch(
+                model, tokenizer, batch_rows, inj_l_char, inj_h_char, inj_L, inj_H, ids_meta, args.device,
+                args.group_size, args.max_new_tokens, args.temperature,
+            )
+            rewards, parsed = compute_rewards(model, tokenizer, heads, critic_template, texts, z_L, z_H,
+                                                weights, args.device, args.log_reward)
+            rewards_t = torch.tensor(rewards, dtype=torch.float32).view(len(batch_rows), args.group_size)
+            mean, std = rewards_t.mean(dim=1, keepdim=True), rewards_t.std(dim=1, keepdim=True).clamp_min(1e-4)
+            advantages = ((rewards_t - mean) / std).view(-1)
+
+            pg_loss, kl_loss = policy_step(model, full_ids, full_attn, S, advantages, inj_L, inj_H, ids_meta,
+                                             z_L, z_H, policy_optim, args.kl_beta, args.device)
+            ar_loss = ar_update_step(model, tokenizer, heads, ar_optim, critic_template, parsed, z_L, z_H,
+                                       weights, args.device)
+
+            n_malformed = sum(p is None for p in parsed)
+            n_cjk_leak = sum(bool(_CJK_RE.search(t)) for t in texts)
+            step += 1
+            pbar.update(1)
+            pbar.set_postfix(reward=f"{sum(rewards)/len(rewards):.3f}", pg=f"{pg_loss:.3f}", kl=f"{kl_loss:.4f}")
+            if step % 5 == 0 or step == 1:
+                print(f"step={step} mean_reward={sum(rewards)/len(rewards):.4f} pg_loss={pg_loss:.4f} "
+                      f"kl={kl_loss:.5f} ar_loss={ar_loss.total.item() if ar_loss else float('nan'):.4f} "
+                      f"malformed={n_malformed}/{len(texts)} cjk_leak={n_cjk_leak}/{len(texts)}")
+                if n_cjk_leak > 0:
+                    print(f"  WARNING: {n_cjk_leak} completions contain CJK chars — possible injection failure "
+                          f"(the marker char leaking into generated text means it wasn't found/overwritten).")
+
+            if step % args.eval_every == 0 and args.eval_parquet:
+                _run_eval(model, tokenizer, args.eval_parquet, inj_l_char, inj_h_char, inj_L, inj_H, ids_meta,
+                            heads, critic_template, weights, args.device, args.log_reward, args.max_new_tokens)
+            if step % args.save_every == 0 or step == args.steps:
+                _save(model, inj_L, inj_H, heads, f"{args.output}/step_{step}")
+
+    _save(model, inj_L, inj_H, heads, f"{args.output}/final")
+    print(f"saved final checkpoint -> {args.output}/final")
+
+
+def _save(model, inj_L, inj_H, heads, path: str) -> None:
+    Path(path).mkdir(parents=True, exist_ok=True)
+    model.save_pretrained(path, selected_adapters=["av", "ar"])
+    save_extra_modules(f"{path}/extra_modules.safetensors", inj_L, inj_H, heads)
+
+
+@torch.no_grad()
+def _run_eval(model, tokenizer, eval_parquet, inj_l_char, inj_h_char, inj_L, inj_H, ids_meta, heads,
+               critic_template, weights, device, log_reward, max_new_tokens):
+    rows, _ = _load_rl_rows(eval_parquet)
+    _full_ids, _full_attn, _S, texts, z_L, z_H = _generate_batch(
+        model, tokenizer, rows[: min(16, len(rows))], inj_l_char, inj_h_char, inj_L, inj_H, ids_meta, device,
+        1, max_new_tokens, temperature=1.0,  # sampled, not greedy — matches training-time rollout distribution
+    )
+    rewards, parsed = compute_rewards(model, tokenizer, heads, critic_template, texts, z_L, z_H, weights, device, log_reward)
+    print(f"  [eval] n={len(texts)} mean_reward={sum(rewards)/len(rewards):.4f} "
+          f"malformed={sum(p is None for p in parsed)}/{len(texts)}")
+
+
+@torch.no_grad()
+def _run_sanity_check(model, tokenizer, rows, inj_l_char, inj_h_char, inj_L, inj_H, ids_meta, heads,
+                        critic_template, weights, device, log_reward):
+    """Reconstruction reward with REAL vectors should beat SHUFFLED vectors
+    (activations permuted across the batch) — the loudest smoke test that
+    injection + the AV/AR pipeline actually carries signal end-to-end."""
+    _full_ids, _full_attn, _S, texts, z_L, z_H = _generate_batch(
+        model, tokenizer, rows, inj_l_char, inj_h_char, inj_L, inj_H, ids_meta, device, 1, 200, 1.0
+    )
+    rewards_real, _ = compute_rewards(model, tokenizer, heads, critic_template, texts, z_L, z_H, weights, device, log_reward)
+    perm = torch.randperm(z_L.shape[0])
+    rewards_shuf, _ = compute_rewards(model, tokenizer, heads, critic_template, texts, z_L[perm], z_H[perm],
+                                        weights, device, log_reward)
+    r_real, r_shuf = sum(rewards_real) / len(rewards_real), sum(rewards_shuf) / len(rewards_shuf)
+    print(f"[sanity] mean_reward real={r_real:.4f} shuffled={r_shuf:.4f}")
+    if r_real <= r_shuf:
+        print("  WARNING: shuffled vectors score >= real vectors — injection may not be wired correctly "
+              "(check nla/hrm/model.py:build_inputs_embeds and the marker IDs in the sidecar).")
+
+
+if __name__ == "__main__":
+    main()
