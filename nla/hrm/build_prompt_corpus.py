@@ -21,7 +21,6 @@ that every row ends up with prompt/dataset/world/doc_id.
 
 import argparse
 import json
-import random
 from dataclasses import dataclass
 
 from datasets import load_dataset
@@ -35,7 +34,8 @@ DEFAULT_SOURCES = [
     "gsm-symbolic=apple/GSM-Symbolic:main:test:question",
     # "proofwriter=voidful/ProofWriter::validation:question",
     "bbh=lukaemon/bbh:causal_judgement:test:input",
-    "musr=TAUR-Lab/MuSR::murder_mysteries:context",
+    "musr=TAUR-Lab/MuSR::murder_mysteries:narrative",
+    "simplestories=SimpleStories/SimpleStories::train:story",
     "da_instruct=danish-foundation-models/danish-dynaword::train:text",
 ]
 
@@ -62,11 +62,14 @@ class SourceSpec:
 
 
 def _rows_from_source(spec: SourceSpec, max_rows: int | None, seed: int) -> list[dict]:
-    ds = load_dataset(spec.hf_id, name=spec.config, split=spec.split)
-    n = len(ds) if max_rows is None else min(max_rows, len(ds))
-    if max_rows is not None and len(ds) > max_rows:
-        idx = sorted(random.Random(f"{seed}|{spec.name}").sample(range(len(ds)), n))
-        ds = ds.select(idx)
+    # Streaming + buffered shuffle: big sources (SimpleStories is ~2M rows) are
+    # never fully downloaded, only ~max_rows (+ shuffle buffer) are read.
+    ds = load_dataset(spec.hf_id, name=spec.config, split=spec.split, streaming=True)
+    assert spec.column in (ds.column_names or [spec.column]), (
+        f"source {spec.name!r} ({spec.hf_id}): no column {spec.column!r}; available: {ds.column_names}"
+    )
+    if max_rows is not None:
+        ds = ds.shuffle(seed=seed, buffer_size=10_000).take(max_rows)
     rows = []
     for i, row in enumerate(ds):
         prompt = row[spec.column]
@@ -110,6 +113,7 @@ def main() -> None:
                     help="'dataset' value for local-jsonl rows that don't already carry one")
     p.add_argument("--max-per-source", type=int, default=2000,
                     help="cap rows pulled per HF source (random subsample, keyed on --seed)")
+    p.add_argument("--strict", action="store_true", help="fail on the first broken source instead of skipping it")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--output", required=True)
     args = p.parse_args()
@@ -120,7 +124,13 @@ def main() -> None:
 
     all_rows: list[dict] = []
     for spec in specs:
-        rows = _rows_from_source(spec, args.max_per_source, args.seed)
+        try:
+            rows = _rows_from_source(spec, args.max_per_source, args.seed)
+        except Exception as e:  # noqa: BLE001 — one unreachable/misconfigured source shouldn't kill the run
+            if args.strict:
+                raise
+            print(f"  WARNING: skipping source {spec.name!r}: {e.__class__.__name__}: {e}")
+            continue
         print(f"  {spec.name}: {len(rows)} rows from {spec.hf_id} ({spec.split})")
         all_rows += rows
     for path in args.local_jsonl:
