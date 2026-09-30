@@ -7,3 +7,6 @@ dist/
 
 # local secrets
 .env
+
+# generated per tokenizer/machine (markers picked+verified at build time); commit deliberately with `git add -f` if you want to pin it
+nla/hrm/injection_token_cache_hrm.yaml
