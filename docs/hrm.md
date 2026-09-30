@@ -255,4 +255,114 @@ python -m nla.hrm.eval --eval-parquet ood=eval_ood.parquet --av-ckpt ckpt/rl/fin
     --run-judge --output eval_report.json
 ```
 
+## Full run, step by step
+
+Run everything from the repo root on a GPU machine with `pip install -e ".[hrm]"`
+(needs `transformers>=5.13`). Scripts default to CUDA + bf16 when available.
+Work in one directory, e.g. `RUN=runs/v1; mkdir -p $RUN && cd $RUN` (paths below
+are relative to it). `configs/hrm/datagen.sh` chains steps 1-8 if you prefer.
+
+**0. Explanation provider + key.** Step 6 calls an LLM. Options
+(`--provider-cls`): `nla.datagen.providers.AnthropicProvider` (needs
+`ANTHROPIC_API_KEY`), `nla.hrm.openai_compat.UCloudGLMProvider` (GLM-5.3, low
+reasoning effort; key in `UCLOUD_API_KEY`, exported or in `./.env` in the
+directory you run from), or any OpenAI-compatible endpoint via
+`nla.hrm.openai_compat.OpenAICompatProvider` + `--provider-kwargs`.
+`.env` is git-ignored. Try step 6 on a slice first and check the `DROPPED` count.
+
+**1. Prompt corpus.** Mixed reasoning + instruction prompts. Sources that fail to
+load are skipped with a warning (`--strict` to fail instead); add `--local-jsonl`
+for HRMMix once you have it. Check the per-source counts it prints.
+```bash
+python -m nla.hrm.build_prompt_corpus --max-per-source 2000 --output corpus.jsonl
+```
+
+**2. Extract Mimir's L/H states** (needs the GPU; Mimir is loaded here only).
+Prompts are length-sorted and batched by token budget; prompts over
+`--max-prompt-tokens` are skipped, not truncated.
+```bash
+python -m nla.hrm.stage0_hrm --corpus corpus.jsonl --output base.parquet \
+    --positions-per-prompt 6 --max-batch-tokens 16384
+```
+
+**3. Diagnostics.** Reports cancellation and cos(z_L, z_H). Strong cancellation
+argues for keeping `--w-sum` high in RL.
+```bash
+python -m nla.hrm.diagnostics --input base.parquet
+```
+
+**4. Split.** Document/`world`-level buckets plus a whole held-out source
+(`--holdout-dataset`, default `musr`) as `eval_ood`; also writes `judge_subset.parquet`.
+```bash
+python -m nla.hrm.split --base base.parquet --output-dir splits/
+```
+
+**5. Norm stats** (train buckets only): mean-predictor baselines for FVE and the
+injection-scale init. Use `--skip-injection-scale` to fall back to 5.0.
+```bash
+python -m nla.hrm.norm_stats --train-parquet splits/av_sft.parquet \
+    --train-parquet splits/ar_sft.parquet --train-parquet splits/rl.parquet \
+    --output norm_stats.json
+```
+
+**6. Explanations** (two independent explanations per row, for the L/H SFT fields).
+```bash
+P="--provider-cls nla.hrm.openai_compat.UCloudGLMProvider"
+python -m nla.hrm.explain --input splits/av_sft.parquet --output splits/av_sft_explained.parquet $P
+python -m nla.hrm.explain --input splits/ar_sft.parquet --output splits/ar_sft_explained.parquet $P
+```
+Skim ~10 explanation pairs before continuing: ~100 words, 4-5 features, and the
+two per row should differ.
+
+**7. Build training/eval parquets.** `--stage rl` is used for every split that has
+no explanations (rl, eval_iid, eval_ood, judge_subset).
+```bash
+python -m nla.hrm.build --input splits/ar_sft_explained.parquet --stage ar_sft --output ar_sft.parquet
+python -m nla.hrm.build --input splits/av_sft_explained.parquet --stage av_sft --output av_sft.parquet
+for s in rl eval_iid eval_ood judge_subset; do
+  python -m nla.hrm.build --input splits/$s.parquet --stage rl --output $s.parquet
+done
+```
+
+**8. SFT warm-ups** (format only: they teach the `L:/H:` format, not L-vs-H content).
+AV-SFT stops early once `--target-format-rate` (0.99) is reached on eval.
+```bash
+python -m nla.hrm.train_ar_sft --train-parquet ar_sft.parquet --output ckpt/ar_sft
+python -m nla.hrm.train_av_sft --train-parquet av_sft.parquet \
+    --norm-stats-json norm_stats.json --output ckpt/av_sft
+```
+Check the AV-SFT `[eval] format_rate` line reached the target before moving on.
+
+**9. RL** (where L/H differentiation can actually emerge). `--sanity` runs once
+before training: real vs. shuffled vectors should score differently (equal scores
+with many malformed completions are not necessarily a bug, see the `malformed=`
+count in the step logs). Watch `malformed`, `cjk_leak` and `kl` in the step lines.
+```bash
+python -m nla.hrm.train_rl --rl-parquet rl.parquet --eval-parquet eval_iid.parquet \
+    --av-sft-ckpt ckpt/av_sft --ar-sft-ckpt ckpt/ar_sft \
+    --batch-size 32 --group-size 8 --max-new-tokens 300 --steps 500 \
+    --sanity --output ckpt/rl
+```
+(`configs/hrm/rl.sh` wraps these with the same defaults.)
+
+**10. Evaluate** (report + Mimir patch-back judge; loads Mimir, so run it on the GPU).
+Pass the same checkpoint dir for AV and AR when evaluating an RL checkpoint.
+```bash
+python -m nla.hrm.eval --eval-parquet iid=eval_iid.parquet ood=eval_ood.parquet \
+    --av-ckpt ckpt/rl/final --ar-ckpt ckpt/rl/final \
+    --norm-stats-json norm_stats.json --run-judge --output eval_report.json
+```
+Run it on the post-SFT checkpoints too (`--av-ckpt ckpt/av_sft --ar-ckpt ckpt/ar_sft`)
+to see what RL added.
+
+**11. Baseline and cross-reconstruction.** The text-only baseline is what the AV's
+explanations must beat; the matrix tests whether the L/H fields carry stream-specific content.
+```bash
+python -m nla.hrm.train_context_baseline --train-parquet rl.parquet --output ckpt/baseline
+python -m nla.hrm.eval_cross --probe-train-parquet rl.parquet --probe-test-parquet eval_ood.parquet \
+    --av-ckpt ckpt/rl/final --ar-ckpt ckpt/rl/final --output cross.json
+```
+`train_context_baseline.py` and `eval_cross.py` have not been run end-to-end yet;
+expect to debug them on first use.
+
 See `CLAUDE.md`'s "HRM extension" section for the load-bearing invariants.
