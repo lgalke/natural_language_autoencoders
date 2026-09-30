@@ -356,6 +356,7 @@ python -m nla.hrm.eval --eval-parquet iid=eval_iid.parquet ood=eval_ood.parquet 
     --av-ckpt ckpt/rl/final --ar-ckpt ckpt/rl/final \
     --norm-stats-json norm_stats.json --run-judge --output eval_report.json
 ```
+For a quick check add `--limit 10` (random sample of 10 rows per split, seeded).
 Run it on the post-SFT checkpoints too (`--av-ckpt ckpt/av_sft --ar-ckpt ckpt/ar_sft`)
 to see what RL added.
 

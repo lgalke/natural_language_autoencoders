@@ -170,6 +170,8 @@ def main() -> None:
     p.add_argument("--w-sum", type=float, default=1.0)
     p.add_argument("--w-comp", type=float, default=0.25)
     p.add_argument("--norm-stats-json", default=None)
+    p.add_argument("--limit", type=int, default=None,
+                    help="evaluate only a random sample of N rows per split (quick check; seeded, reproducible)")
     p.add_argument("--dump-samples", default=None,
                     help="write one JSON line per eval row (context, completion, L/H fields, per-row FVE) to this path")
     p.add_argument("--run-judge", action="store_true")
@@ -193,6 +195,9 @@ def main() -> None:
     for spec in [spec for group in args.eval_parquet for spec in group]:
         name, path = spec.split("=", 1)
         rows = pq.read_table(path).to_pylist()
+        if args.limit is not None and len(rows) > args.limit:
+            import random
+            rows = random.Random(0).sample(rows, args.limit)
         meta = read_sidecar(LocalStorage(), path)
         tm = meta.tokens
         assert tm is not None
