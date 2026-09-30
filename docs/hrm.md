@@ -357,6 +357,18 @@ python -m nla.hrm.eval --eval-parquet iid=eval_iid.parquet ood=eval_ood.parquet 
 Run it on the post-SFT checkpoints too (`--av-ckpt ckpt/av_sft --ar-ckpt ckpt/ar_sft`)
 to see what RL added.
 
+**Inspecting outputs.** RL appends a few rollouts every `--samples-every` steps (default 10) to
+`ckpt/rl/samples.jsonl`, and logs `fve_sum/fve_L/fve_H` per step when `norm_stats.json` sits next to
+`rl.parquet` (or via `--norm-stats-json`). For a whole split, add `--dump-samples samples.jsonl` to step 10
+(one line per row: context, completion, L/H fields, per-row MSE/FVE). To run on a NEW prompt:
+```bash
+python -m nla.hrm.infer --prompt "Your text here" --positions -1 \
+    --av-ckpt ckpt/rl/final --ar-ckpt ckpt/rl/final --sidecar-from rl.parquet \
+    --norm-stats-json norm_stats.json --judge
+```
+`--positions` are token indices into the rendered prompt (negative = from the end); `--show-tokens`
+prints them. `--sidecar-from` is any built parquet (it supplies the injection markers/templates).
+
 **11. Baseline and cross-reconstruction.** The text-only baseline is what the AV's
 explanations must beat; the matrix tests whether the L/H fields carry stream-specific content.
 ```bash

@@ -25,6 +25,7 @@ and the RAW gold z_L/z_H already extracted into the RL parquet.
 """
 
 import argparse
+import json
 import re
 from pathlib import Path
 
@@ -47,7 +48,9 @@ _CJK_RE = re.compile(r"[㈀-㏿一-鿿]")
 
 
 def _load_rl_rows(parquet_path: str) -> tuple[list[dict], HrmDatasetMeta]:
-    t = pq.read_table(parquet_path, columns=["prompt", "z_L", "z_H"])
+    names = pq.ParquetFile(parquet_path).schema_arrow.names
+    cols = ["prompt", "z_L", "z_H"] + [c for c in ("context_marked", "dataset", "position") if c in names]
+    t = pq.read_table(parquet_path, columns=cols)
     return t.to_pylist(), read_sidecar(LocalStorage(), parquet_path)
 
 
@@ -96,6 +99,17 @@ def _generate_batch(model, tokenizer, rows, inj_l_char, inj_h_char, inj_L, inj_H
 _MICRO_BATCH = 8
 
 
+def fve_from_mses(mses: dict, baseline: dict | None) -> dict[str, float]:
+    """Mean FVE per term over this batch's well-formed rollouts, relative to
+    norm_stats.json's train-set mean-predictor MSE (FVE=0 means "no better than
+    predicting the mean"). Cheap: the per-rollout MSEs are already computed for the reward."""
+    if not mses or baseline is None:
+        return {}
+    n = len(mses)
+    cols = {"sum": 0, "L": 1, "H": 2}
+    return {f"fve_{k}": 1.0 - (sum(m[i] for m in mses.values()) / n) / baseline[k] for k, i in cols.items()}
+
+
 def _critic_hidden(model, tokenizer, texts: list[str], device: str) -> torch.Tensor:
     model.set_adapter("ar")
     enc = tokenizer(texts, return_tensors="pt", padding=True, add_special_tokens=False,
@@ -119,6 +133,7 @@ def compute_rewards(model, tokenizer, heads, critic_template, texts, z_L, z_H, w
     parsed = [parse_fields(t) for t in texts]
     ok_idx = [i for i, p in enumerate(parsed) if p is not None]
     computed: dict[int, float] = {}
+    mses: dict[int, tuple[float, float, float]] = {}  # rollout -> (mse_sum, mse_L, mse_H), for FVE logging
     if ok_idx:
         l_texts = [critic_template.format(explanation=parsed[i][0]) for i in ok_idx]
         h_texts = [critic_template.format(explanation=parsed[i][1]) for i in ok_idx]
@@ -130,9 +145,10 @@ def compute_rewards(model, tokenizer, heads, critic_template, texts, z_L, z_H, w
             for j, i in enumerate(ok_idx):
                 loss = recon_loss(zL_hat[j : j + 1], zH_hat[j : j + 1], gold_L[j : j + 1], gold_H[j : j + 1], weights)
                 computed[i] = loss_to_reward(loss.total, log_reward=log_reward)
+                mses[i] = (loss.mse_sum.item(), loss.mse_L.item(), loss.mse_H.item())
     fallback = failed_reward(weights, log_reward=log_reward)
     rewards: list[float] = [computed[i] if i in computed else fallback for i in range(len(texts))]
-    return rewards, parsed
+    return rewards, parsed, mses
 
 
 def ar_update_step(model, tokenizer, heads, heads_optim, critic_template, parsed, z_L, z_H, weights, device):
@@ -209,6 +225,11 @@ def main() -> None:
     p.add_argument("--group-size", type=int, default=8, help="G rollouts per row (GRPO group)")
     p.add_argument("--micro-batch-size", type=int, default=8,
                     help="rollouts per forward/backward pass (memory knob; results are identical)")
+    p.add_argument("--norm-stats-json", default=None,
+                    help="norm_stats.json for FVE logging (default: norm_stats.json next to --rl-parquet, if present)")
+    p.add_argument("--samples-every", type=int, default=10,
+                    help="every N steps append a few rollouts (text, reward) to <output>/samples.jsonl; 0=off")
+    p.add_argument("--samples-per-dump", type=int, default=4)
     p.add_argument("--max-new-tokens", type=int, default=300)
     p.add_argument("--temperature", type=float, default=1.0)
     p.add_argument("--steps", type=int, default=200)
@@ -227,6 +248,10 @@ def main() -> None:
     verbalizer_model = args.verbalizer_model or DEFAULT_VERBALIZER
     dtype = {"float32": torch.float32, "bfloat16": torch.bfloat16}[args.dtype]
     weights = ReconWeights(w_sum=args.w_sum, w_comp=args.w_comp)
+    norm_path = args.norm_stats_json or str(Path(args.rl_parquet).parent / "norm_stats.json")
+    baseline = json.load(open(norm_path))["mean_mse"] if Path(norm_path).exists() else None
+    print(f"[train_rl] FVE baseline: {norm_path if baseline else 'none (no norm_stats.json — FVE not logged)'}")
+    Path(args.output).mkdir(parents=True, exist_ok=True)
     global _MICRO_BATCH
     _MICRO_BATCH = args.micro_batch_size
 
@@ -266,8 +291,9 @@ def main() -> None:
                 model, tokenizer, batch_rows, inj_l_char, inj_h_char, inj_L, inj_H, ids_meta, args.device,
                 args.group_size, args.max_new_tokens, args.temperature,
             )
-            rewards, parsed = compute_rewards(model, tokenizer, heads, critic_template, texts, z_L, z_H,
+            rewards, parsed, mses = compute_rewards(model, tokenizer, heads, critic_template, texts, z_L, z_H,
                                                 weights, args.device, args.log_reward)
+            fve = fve_from_mses(mses, baseline)
             rewards_t = torch.tensor(rewards, dtype=torch.float32).view(len(batch_rows), args.group_size)
             mean, std = rewards_t.mean(dim=1, keepdim=True), rewards_t.std(dim=1, keepdim=True).clamp_min(1e-4)
             advantages = ((rewards_t - mean) / std).view(-1)
@@ -282,10 +308,20 @@ def main() -> None:
             step += 1
             pbar.update(1)
             pbar.set_postfix(reward=f"{sum(rewards)/len(rewards):.3f}", pg=f"{pg_loss:.3f}", kl=f"{kl_loss:.4f}")
+            if args.samples_every and (step % args.samples_every == 0 or step == 1):
+                with open(f"{args.output}/samples.jsonl", "a") as f:
+                    for k in range(min(args.samples_per_dump, len(texts))):
+                        row = batch_rows[k // args.group_size]
+                        f.write(json.dumps({
+                            "step": step, "reward": rewards[k], "well_formed": parsed[k] is not None,
+                            "dataset": row.get("dataset"), "position": row.get("position"),
+                            "context_marked": row.get("context_marked"), "completion": texts[k],
+                        }, ensure_ascii=False) + "\n")
             if step % 5 == 0 or step == 1:
                 print(f"step={step} mean_reward={sum(rewards)/len(rewards):.4f} pg_loss={pg_loss:.4f} "
                       f"kl={kl_loss:.5f} ar_loss={ar_loss.total.item() if ar_loss else float('nan'):.4f} "
-                      f"malformed={n_malformed}/{len(texts)} cjk_leak={n_cjk_leak}/{len(texts)}")
+                      f"malformed={n_malformed}/{len(texts)} cjk_leak={n_cjk_leak}/{len(texts)}"
+                      + "".join(f" {k}={v:.3f}" for k, v in fve.items()))
                 if n_cjk_leak > 0:
                     print(f"  WARNING: {n_cjk_leak} completions contain CJK chars — possible injection failure "
                           f"(the marker char leaking into generated text means it wasn't found/overwritten).")
@@ -314,7 +350,7 @@ def _run_eval(model, tokenizer, eval_parquet, inj_l_char, inj_h_char, inj_L, inj
         model, tokenizer, rows[: min(16, len(rows))], inj_l_char, inj_h_char, inj_L, inj_H, ids_meta, device,
         1, max_new_tokens, temperature=1.0,  # sampled, not greedy — matches training-time rollout distribution
     )
-    rewards, parsed = compute_rewards(model, tokenizer, heads, critic_template, texts, z_L, z_H, weights, device, log_reward)
+    rewards, parsed, _mses = compute_rewards(model, tokenizer, heads, critic_template, texts, z_L, z_H, weights, device, log_reward)
     print(f"  [eval] n={len(texts)} mean_reward={sum(rewards)/len(rewards):.4f} "
           f"malformed={sum(p is None for p in parsed)}/{len(texts)}")
 
@@ -328,11 +364,11 @@ def _run_sanity_check(model, tokenizer, rows, inj_l_char, inj_h_char, inj_L, inj
     _full_ids, _full_attn, _S, texts, z_L, z_H = _generate_batch(
         model, tokenizer, rows, inj_l_char, inj_h_char, inj_L, inj_H, ids_meta, device, 1, 200, 1.0
     )
-    rewards_real, _ = compute_rewards(model, tokenizer, heads, critic_template, texts, z_L, z_H, weights, device, log_reward)
+    rewards_real, _, _m1 = compute_rewards(model, tokenizer, heads, critic_template, texts, z_L, z_H, weights, device, log_reward)
     # roll by one: a guaranteed non-identity shuffle (randperm is the identity with prob 1/N!,
     # which made tiny-batch sanity checks report real == shuffled)
     perm = torch.roll(torch.arange(z_L.shape[0]), 1)
-    rewards_shuf, _ = compute_rewards(model, tokenizer, heads, critic_template, texts, z_L[perm], z_H[perm],
+    rewards_shuf, _, _m2 = compute_rewards(model, tokenizer, heads, critic_template, texts, z_L[perm], z_H[perm],
                                         weights, device, log_reward)
     r_real, r_shuf = sum(rewards_real) / len(rewards_real), sum(rewards_shuf) / len(rewards_shuf)
     print(f"[sanity] mean_reward real={r_real:.4f} shuffled={r_shuf:.4f}")

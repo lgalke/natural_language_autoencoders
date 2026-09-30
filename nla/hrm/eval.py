@@ -40,7 +40,7 @@ _D_MIMIR = 1536
 
 
 @torch.no_grad()
-def generate_and_reconstruct(model, tokenizer, rows, inj_l_char, inj_h_char, inj_L, inj_H, ids_meta,
+def generate_and_reconstruct(model, tokenizer, rows, inj_l_char, inj_h_char, inj_L, inj_H, heads, ids_meta,
                                critic_template, device, max_new_tokens=300, batch_size=16):
     from nla.hrm.model import build_inputs_embeds
 
@@ -77,10 +77,8 @@ def generate_and_reconstruct(model, tokenizer, rows, inj_l_char, inj_h_char, inj
             c_out = model(input_ids=c_ids, attention_mask=c_attn, output_hidden_states=True, logits_to_keep=1)
             lengths = c_attn.sum(dim=1) - 1
             h_last = c_out.hidden_states[-1][torch.arange(c_ids.shape[0]), lengths]
-            from nla.hrm.model import ReconHeads
-            heads_dummy: ReconHeads = _HEADS_HOLDER["heads"]
             n = len(ok_idx)
-            zL_pred, zH_pred = heads_dummy.forward_L(h_last[:n]), heads_dummy.forward_H(h_last[n:])
+            zL_pred, zH_pred = heads.forward_L(h_last[:n]), heads.forward_H(h_last[n:])
             for j, i in enumerate(ok_idx):
                 zL_hat[i] = zL_pred[j]
                 zH_hat[i] = zH_pred[j]
@@ -93,7 +91,23 @@ def generate_and_reconstruct(model, tokenizer, rows, inj_l_char, inj_h_char, inj
     return out
 
 
-_HEADS_HOLDER: dict = {}  # set by main() — avoids threading `heads` through every call
+def _dump_samples(path: str, split: str, results: list[dict], weights: ReconWeights, mean_mse: dict | None) -> None:
+    with open(path, "a") as f:
+        for r in results:
+            row = r["row"]
+            rec = {"split": split, "dataset": row.get("dataset"), "position": row.get("position"),
+                   "is_last_prompt_pos": row.get("is_last_prompt_pos"),
+                   "context_marked": row.get("context_marked"), "completion": r["text"],
+                   "L_field": r["parsed"][0] if r["parsed"] else None,
+                   "H_field": r["parsed"][1] if r["parsed"] else None}
+            if r["parsed"] is not None:
+                z_L = torch.tensor(row["z_L"]).unsqueeze(0)
+                z_H = torch.tensor(row["z_H"]).unsqueeze(0)
+                loss = recon_loss(r["z_L_hat"].unsqueeze(0), r["z_H_hat"].unsqueeze(0), z_L, z_H, weights)
+                rec["mse"] = {"sum": loss.mse_sum.item(), "L": loss.mse_L.item(), "H": loss.mse_H.item()}
+                if mean_mse:
+                    rec["fve"] = {k: v for k, v in loss.fve(mean_mse["sum"], mean_mse["L"], mean_mse["H"]).items()}
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
 
 def _jaccard(a: str, b: str) -> float:
@@ -155,6 +169,8 @@ def main() -> None:
     p.add_argument("--w-sum", type=float, default=1.0)
     p.add_argument("--w-comp", type=float, default=0.25)
     p.add_argument("--norm-stats-json", default=None)
+    p.add_argument("--dump-samples", default=None,
+                    help="write one JSON line per eval row (context, completion, L/H fields, per-row FVE) to this path")
     p.add_argument("--run-judge", action="store_true")
     p.add_argument("--base-model", default=None)
     p.add_argument("--output", required=True)
@@ -168,8 +184,9 @@ def main() -> None:
     model, tokenizer = load_verbalizer(verbalizer_model, device=args.device, torch_dtype=dtype)
     d_verb = model.config.hidden_size
     inj_L, inj_H, heads = load_rl_checkpoint(model, args.av_ckpt, args.ar_ckpt, _D_MIMIR, d_verb, args.device)
-    _HEADS_HOLDER["heads"] = heads
 
+    if args.dump_samples:
+        open(args.dump_samples, "w").close()  # truncate once; each split appends
     report: dict = {"splits": {}}
     all_results: dict[str, list[dict]] = {}
     for spec in args.eval_parquet:
@@ -181,9 +198,11 @@ def main() -> None:
         ids_meta = (tm.injection_token_id_L, tm.injection_left_neighbor_id_L, tm.injection_right_neighbor_id_L,
                     tm.injection_token_id_H, tm.injection_left_neighbor_id_H, tm.injection_right_neighbor_id_H)
         results = generate_and_reconstruct(model, tokenizer, rows, tm.injection_char_L, tm.injection_char_H,
-                                             inj_L, inj_H, ids_meta, meta.prompt_templates["critic"], args.device,
+                                             inj_L, inj_H, heads, ids_meta, meta.prompt_templates["critic"], args.device,
                                              args.max_new_tokens, args.batch_size)
         all_results[name] = results
+        if args.dump_samples:
+            _dump_samples(args.dump_samples, name, results, weights, mean_mse)
         summary = summarize(results, weights, mean_mse)
         last = [r for r in results if r["row"].get("is_last_prompt_pos")]
         other = [r for r in results if not r["row"].get("is_last_prompt_pos")]
