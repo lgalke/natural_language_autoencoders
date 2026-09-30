@@ -111,14 +111,19 @@ class HrmH2Patcher:
         self.close()
 
 
+def _kl(la: torch.Tensor, lb: torch.Tensor) -> torch.Tensor:
+    """KL(softmax(la) || softmax(lb)) per row; la, lb: [n, vocab] float32."""
+    return (F.softmax(la, dim=-1) * (F.log_softmax(la, dim=-1) - F.log_softmax(lb, dim=-1))).sum(-1)
+
+
 @torch.no_grad()
-def run_judge(
+def _judge_batch(
     model, tokenizer, rows: list[dict], z_L_hat: torch.Tensor, z_H_hat: torch.Tensor,
-    device: str, mean_s: torch.Tensor | None = None, mean_zH: torch.Tensor | None = None,
+    device: str, mean_s: torch.Tensor | None, mean_zH: torch.Tensor | None,
 ) -> dict:
-    """rows: parquet rows with prompt_ids/position/prompt_len/z_L/z_H (GOLD).
-    z_L_hat/z_H_hat: reconstructed streams, [N, d_model], SAME row order.
-    Returns per-row and aggregate KL numbers for both patches."""
+    """One padded batch. Memory note: we run the inner HrmTextModel and apply the LM head ONLY at the
+    two positions per row we need (patch position, last prompt token). Full [rows, seq, vocab=262144]
+    logits (what model(...) builds) are tens of GB for long prompts and used to OOM."""
     n = len(rows)
     pad_id = tokenizer.pad_token_id
     input_ids, attn = _pad_batch([r["prompt_ids"] for r in rows], pad_id, device)
@@ -129,41 +134,31 @@ def run_judge(
     z_H_gold = torch.tensor([r["z_H"] for r in rows], dtype=torch.float32, device=device)
     s_gold = z_L_gold + z_H_gold
     s_hat = z_L_hat.to(device) + z_H_hat.to(device)
+    b_all = torch.arange(n, device=device)
 
     def _forward(want_capture: bool = False):
-        # Any active HrmH2Patcher patch is applied via ITS OWN already-
-        # registered hooks (module docstring above) — this just runs the
-        # forward pass and wraps a fresh HrmStreamCapture around it purely
-        # for the free call-count sanity check (6 L / 2 H fires), same as
-        # every other Mimir forward pass in this codebase.
+        # Any active HrmH2Patcher patch is applied via ITS OWN already-registered hooks; the capture is
+        # only for the call-count sanity check (6 L / 2 H fires) and to read back recomputed vectors.
         cap = HrmStreamCapture(model)
-        out = model(input_ids=input_ids, attention_mask=attn, token_type_ids=token_type_ids, use_cache=False)
+        h = model.model(input_ids=input_ids, attention_mask=attn, token_type_ids=token_type_ids,
+                        use_cache=False).last_hidden_state
         cap.verify_call_counts()
         cap.close()
-        return (out.logits.float(), cap) if want_capture else out.logits.float()
+        out = (model.lm_head(h[b_all, positions]).float(), model.lm_head(h[b_all, last_positions]).float())
+        return (out, cap) if want_capture else out
 
-    # --- correctness check + clean baseline ---
-    logits_clean, clean_cap = _forward(want_capture=True)
-    b_all = torch.arange(n, device=device)
+    (lp_clean, ll_clean), clean_cap = _forward(want_capture=True)
     s_recomputed = clean_cap.h_in_target[b_all, positions]   # H_in@2 as computed in THIS pass
     zH_recomputed = clean_cap.z_H[b_all, positions]
     bf16 = next(model.parameters()).dtype != torch.float32
     tol_soft = 5e-2 if bf16 else 1e-4   # stored-vs-recomputed drift: bf16 rounding differs between batch compositions
 
-    def _kl_at(logits_a: torch.Tensor, logits_b: torch.Tensor, pos: torch.Tensor) -> torch.Tensor:
-        b_idx = torch.arange(logits_a.shape[0])
-        la, lb = logits_a[b_idx, pos], logits_b[b_idx, pos]
-        pa, logpb = F.softmax(la, dim=-1), F.log_softmax(lb, dim=-1)
-        loga = F.log_softmax(la, dim=-1)
-        return (pa * (loga - logpb)).sum(-1)
-
     results: dict = {}
-
     with HrmH2Patcher(model) as patcher:
         # (a) mechanism check: patching back the vector RECOMPUTED in this very pass must
         # reproduce the clean logits exactly — this is what tests the patch hook itself.
         patcher.set_patch_h2(positions, s_recomputed)
-        kl_mech = _kl_at(logits_clean, _forward(), positions)
+        kl_mech = _kl(lp_clean, _forward()[0])
         assert kl_mech.max().item() < 1e-4, (
             f"patching back the recomputed s did not reproduce clean logits (max KL={kl_mech.max().item():.2e}) — "
             f"patch mechanism or hook-site assumption is wrong, distrust everything below."
@@ -172,7 +167,7 @@ def run_judge(
         # composition/padding), so in bf16 it differs from the recomputed one by rounding noise.
         # Reconstruction KLs must be read against this floor.
         patcher.set_patch_h2(positions, s_gold)
-        kl_true = _kl_at(logits_clean, _forward(), positions)
+        kl_true = _kl(lp_clean, _forward()[0])
         if kl_true.max().item() > tol_soft:
             print(f"  [judge] WARNING: stored gold s drifts from recomputed (max KL={kl_true.max().item():.2e} > {tol_soft:.0e}); "
                   f"stored vectors may come from a different dtype/renderer than this judge run.")
@@ -182,10 +177,9 @@ def run_judge(
         )
 
         patcher.set_patch_h2(positions, s_hat)
-        logits_pred = _forward()
-        kl_pred_at_patch = _kl_at(logits_clean, logits_pred, positions)
-        kl_pred_at_last = _kl_at(logits_clean, logits_pred, last_positions)
-
+        lp_pred, ll_pred = _forward()
+        kl_pred_at_patch = _kl(lp_clean, lp_pred)
+        kl_pred_at_last = _kl(ll_clean, ll_pred)
         results["primary"] = {
             "kl_mechanism_max": kl_mech.max().item(),  # recomputed-vector patch, expect ~0
             "kl_true_at_patch_max": kl_true.max().item(),  # stored-gold noise floor (bf16 rounding)
@@ -193,49 +187,78 @@ def run_judge(
             "kl_pred_at_patch": kl_pred_at_patch.tolist(),
             "kl_pred_at_last": kl_pred_at_last.tolist(),
         }
-
         if mean_s is not None:
-            mean_s_rep = mean_s.to(device).unsqueeze(0).expand(n, -1)
-            patcher.set_patch_h2(positions, mean_s_rep)
-            logits_mean = _forward()
-            kl_mean_at_patch = _kl_at(logits_clean, logits_mean, positions)
-            frac_recovered = [
+            patcher.set_patch_h2(positions, mean_s.to(device).unsqueeze(0).expand(n, -1))
+            kl_mean = _kl(lp_clean, _forward()[0])
+            results["primary"]["kl_mean_ablation_at_patch"] = kl_mean.tolist()
+            results["primary"]["frac_kl_recovered"] = [
                 1.0 - (p / m) if m > 1e-8 else float("nan")
-                for p, m in zip(kl_pred_at_patch.tolist(), kl_mean_at_patch.tolist(), strict=True)
+                for p, m in zip(kl_pred_at_patch.tolist(), kl_mean.tolist(), strict=True)
             ]
-            results["primary"]["kl_mean_ablation_at_patch"] = kl_mean_at_patch.tolist()
-            results["primary"]["frac_kl_recovered"] = frac_recovered
 
         # --- secondary: patch z_H alone at H_out@1, let cycle 2 run normally ---
         patcher.clear()
         patcher.set_patch_h1(positions, zH_recomputed)
-        kl_mech_h = _kl_at(logits_clean, _forward(), positions)
+        kl_mech_h = _kl(lp_clean, _forward()[0])
         assert kl_mech_h.max().item() < 1e-4, (
             f"patching back the recomputed z_H did not reproduce clean logits (max KL={kl_mech_h.max().item():.2e})"
         )
         patcher.set_patch_h1(positions, z_H_gold)
-        kl_true_h = _kl_at(logits_clean, _forward(), positions)
-
+        kl_true_h = _kl(lp_clean, _forward()[0])
         patcher.set_patch_h1(positions, z_H_hat.to(device))
-        logits_pred_h = _forward()
-        kl_pred_h_at_patch = _kl_at(logits_clean, logits_pred_h, positions)
+        kl_pred_h = _kl(lp_clean, _forward()[0])
         results["secondary_zH"] = {
             "kl_mechanism_max": kl_mech_h.max().item(),
             "kl_true_at_patch_max": kl_true_h.max().item(),
-            "kl_pred_at_patch": kl_pred_h_at_patch.tolist(),
+            "kl_pred_at_patch": kl_pred_h.tolist(),
         }
         if mean_zH is not None:
-            mean_zH_rep = mean_zH.to(device).unsqueeze(0).expand(n, -1)
-            patcher.set_patch_h1(positions, mean_zH_rep)
-            logits_mean_h = _forward()
-            kl_mean_h = _kl_at(logits_clean, logits_mean_h, positions)
+            patcher.set_patch_h1(positions, mean_zH.to(device).unsqueeze(0).expand(n, -1))
+            kl_mean_h = _kl(lp_clean, _forward()[0])
             results["secondary_zH"]["kl_mean_ablation_at_patch"] = kl_mean_h.tolist()
             results["secondary_zH"]["frac_kl_recovered"] = [
                 1.0 - (p / m) if m > 1e-8 else float("nan")
-                for p, m in zip(kl_pred_h_at_patch.tolist(), kl_mean_h.tolist(), strict=True)
+                for p, m in zip(kl_pred_h.tolist(), kl_mean_h.tolist(), strict=True)
             ]
-
     return results
+
+
+def run_judge(
+    model, tokenizer, rows: list[dict], z_L_hat: torch.Tensor, z_H_hat: torch.Tensor,
+    device: str, mean_s: torch.Tensor | None = None, mean_zH: torch.Tensor | None = None,
+    max_batch_tokens: int = 16384, max_rows: int = 16,
+) -> dict:
+    """rows: parquet rows with prompt_ids/position/prompt_len/z_L/z_H (GOLD).
+    z_L_hat/z_H_hat: reconstructed streams, [N, d_model], SAME row order.
+    Rows are processed in length-sorted chunks under a token budget (attention memory is quadratic in
+    length); per-row lists come back in the ORIGINAL order, `*_max` entries are maxima over chunks."""
+    N = len(rows)
+    order = sorted(range(N), key=lambda i: len(rows[i]["prompt_ids"]))
+    chunks: list[list[int]] = []
+    cur: list[int] = []
+    for i in order:
+        length = len(rows[i]["prompt_ids"])
+        if cur and (len(cur) >= max_rows or (len(cur) + 1) * length > max_batch_tokens):
+            chunks.append(cur)
+            cur = []
+        cur.append(i)
+    if cur:
+        chunks.append(cur)
+
+    merged: dict = {}
+    for idx in chunks:
+        part = _judge_batch(model, tokenizer, [rows[i] for i in idx], z_L_hat[idx], z_H_hat[idx],
+                            device, mean_s, mean_zH)
+        for sec, vals in part.items():
+            m = merged.setdefault(sec, {})
+            for k, v in vals.items():
+                if isinstance(v, list):
+                    full = m.setdefault(k, [None] * N)
+                    for j, i in enumerate(idx):
+                        full[i] = v[j]
+                else:
+                    m[k] = max(m.get(k, v), v)
+    return merged
 
 
 def main() -> None:
