@@ -21,6 +21,7 @@ import pyarrow.parquet as pq
 import torch
 from tqdm import tqdm
 
+from nla.hrm.devices import default_device, default_dtype
 from nla.datagen._common import add_storage_args, make_storage
 from nla.hrm.mimir import HrmStreamCapture, context_marked, load_mimir, render_and_encode_batch, render_prompts
 from nla.hrm.sidecar import HrmDatasetMeta, HrmExtractionMeta, write_sidecar
@@ -81,8 +82,8 @@ def main() -> None:
     p.add_argument("--max-prompt-tokens", type=int, default=2048,
                     help="skip prompts whose rendered length exceeds this (never truncated: "
                          "cutting the chat template would change what the model sees)")
-    p.add_argument("--device", default="cpu")
-    p.add_argument("--dtype", choices=["float32", "bfloat16"], default="bfloat16")
+    p.add_argument("--device", default=default_device())
+    p.add_argument("--dtype", choices=["float32", "bfloat16"], default=default_dtype())
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--limit", type=int, default=None, help="only process the first N corpus rows (smoke test)")
     p.add_argument("--output", required=True)

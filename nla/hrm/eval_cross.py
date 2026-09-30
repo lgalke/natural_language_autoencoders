@@ -23,6 +23,7 @@ import pyarrow.parquet as pq
 import torch
 from tqdm import tqdm
 
+from nla.hrm.devices import default_device, default_dtype
 from nla.hrm.build import _INJECT_H_PLACEHOLDER, _INJECT_L_PLACEHOLDER
 from nla.hrm.model import DEFAULT_VERBALIZER, load_rl_checkpoint, load_verbalizer
 from nla.hrm.recon import parse_fields
@@ -142,8 +143,8 @@ def main() -> None:
     p.add_argument("--av-ckpt", required=True)
     p.add_argument("--ar-ckpt", required=True, help="only used to load injection adapters; the real AR itself is unused here")
     p.add_argument("--verbalizer-model", default=None)
-    p.add_argument("--device", default="cpu")
-    p.add_argument("--dtype", choices=["float32", "bfloat16"], default="float32")
+    p.add_argument("--device", default=default_device())
+    p.add_argument("--dtype", choices=["float32", "bfloat16"], default=default_dtype())
     p.add_argument("--max-new-tokens", type=int, default=300)
     p.add_argument("--probe-epochs", type=int, default=3)
     p.add_argument("--probe-lr", type=float, default=1e-4)

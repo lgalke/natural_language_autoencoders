@@ -31,6 +31,7 @@ import pyarrow.parquet as pq
 import torch
 import torch.nn.functional as F
 
+from nla.hrm.devices import default_device, default_dtype
 from nla.hrm.mimir import HrmStreamCapture, load_mimir
 
 
@@ -222,8 +223,8 @@ def main() -> None:
     p.add_argument("--reconstructions", required=True,
                     help="JSON {row_index: {z_L_hat: [...], z_H_hat: [...]}} — produced by eval.py's rollout step")
     p.add_argument("--base-model", default=None, help="defaults to nla.hrm.mimir.DEFAULT_MIMIR")
-    p.add_argument("--device", default="cpu")
-    p.add_argument("--dtype", choices=["float32", "bfloat16"], default="bfloat16")
+    p.add_argument("--device", default=default_device())
+    p.add_argument("--dtype", choices=["float32", "bfloat16"], default=default_dtype())
     p.add_argument("--mean-s-json", default=None, help="{'mean_s': [...], 'mean_zH': [...]} — train-set means")
     p.add_argument("--output", required=True)
     args = p.parse_args()

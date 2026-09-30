@@ -19,6 +19,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
+from nla.hrm.devices import default_device, default_dtype
 from nla.hrm.model import ReconHeads, load_verbalizer
 from nla.schema import normalize_activation
 
@@ -50,8 +51,8 @@ def main() -> None:
     p.add_argument("--train-parquet", required=True)
     p.add_argument("--eval-parquet", default=None)
     p.add_argument("--verbalizer-model", default=None, help="defaults to nla.hrm.model.DEFAULT_VERBALIZER")
-    p.add_argument("--device", default="cpu")
-    p.add_argument("--dtype", choices=["float32", "bfloat16"], default="float32")
+    p.add_argument("--device", default=default_device())
+    p.add_argument("--dtype", choices=["float32", "bfloat16"], default=default_dtype())
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--epochs", type=int, default=1)
     p.add_argument("--lr", type=float, default=1e-4)

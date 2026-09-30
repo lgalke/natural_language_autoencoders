@@ -21,6 +21,7 @@ import numpy as np
 import pyarrow.parquet as pq
 import torch
 
+from nla.hrm.devices import default_device
 from nla.hrm.recon import shared_normalize
 
 
@@ -83,7 +84,7 @@ def main() -> None:
     p.add_argument("--max-rows", type=int, default=100_000)
     p.add_argument("--verbalizer-model", default="Qwen/Qwen2.5-1.5B-Instruct")
     p.add_argument("--skip-injection-scale", action="store_true")
-    p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    p.add_argument("--device", default=default_device())
     p.add_argument("--injection-scale-n-samples", type=int, default=32)
     p.add_argument("--output", required=True, help="output JSON path")
     args = p.parse_args()

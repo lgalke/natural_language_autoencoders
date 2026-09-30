@@ -28,6 +28,7 @@ import pyarrow.parquet as pq
 import torch
 from tqdm import tqdm
 
+from nla.hrm.devices import default_device, default_dtype
 from nla.hrm.build import _INJECT_H_PLACEHOLDER, _INJECT_L_PLACEHOLDER
 from nla.hrm.diagnostics import compute_stream_stats
 from nla.hrm.model import DEFAULT_VERBALIZER, load_rl_checkpoint, load_verbalizer
@@ -147,8 +148,8 @@ def main() -> None:
     p.add_argument("--av-ckpt", required=True)
     p.add_argument("--ar-ckpt", required=True)
     p.add_argument("--verbalizer-model", default=None)
-    p.add_argument("--device", default="cpu")
-    p.add_argument("--dtype", choices=["float32", "bfloat16"], default="float32")
+    p.add_argument("--device", default=default_device())
+    p.add_argument("--dtype", choices=["float32", "bfloat16"], default=default_dtype())
     p.add_argument("--max-new-tokens", type=int, default=300)
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--w-sum", type=float, default=1.0)
