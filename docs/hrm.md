@@ -380,3 +380,6 @@ python -m nla.hrm.eval_cross --probe-train-parquet rl.parquet --probe-test-parqu
 expect to debug them on first use.
 
 See `CLAUDE.md`'s "HRM extension" section for the load-bearing invariants.
+
+Decisions, observations, open questions and notes for a paper's methods section are in the
+[OKF](https://okf.md) knowledge bundle at `docs/okf/` (start at `docs/okf/index.md`).

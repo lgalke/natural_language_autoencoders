@@ -1,0 +1,34 @@
+---
+okf_version: "0.1"
+---
+
+# Overview
+* [HRM verbalizer](/overview.md) - goal, method in one paragraph, current status
+
+# Decisions
+* [Standalone trainer, not Miles](/decisions/own-trainer-not-miles.md) - why nla/hrm has its own PyTorch+PEFT loop
+* [Verbalizer model](/decisions/verbalizer-model.md) - Qwen2.5-1.5B, LoRA adapters, full-depth AR, affine maps
+* [Hook site](/decisions/hook-site.md) - z_L and z_H just before the second H application
+* [Prompt rendering and PrefixLM](/decisions/prefixlm-rendering.md) - chat template, bidirectional block, padding verified
+* [Shared-scalar normalization](/decisions/shared-scalar-normalization.md) - keeps z_L + z_H additive
+* [Loss and reward](/decisions/loss-and-reward.md) - sum anchor plus per-stream MSE, failure reward
+* [Two injection markers](/decisions/two-injection-markers.md) - [L]/[H] slots, verified in context
+* [SFT is format-only](/decisions/sft-is-format-only.md) - why no stream-specific teacher exists
+* [RL design](/decisions/rl-design.md) - GRPO-style loop, online AR, KL to post-SFT
+* [Judge design](/decisions/judge-design.md) - patch-back KL, eval-only
+* [Corpus and splits](/decisions/corpus-and-splits.md) - sources, positions, OOD holdout
+* [Explanation teacher](/decisions/explanation-teacher.md) - GLM-5.3 via an OpenAI-compatible provider
+
+# Observations
+* [Cancellation of L and H](/observations/cancellation.md) - cos about -0.8 on a small sample
+* [RL run 1](/observations/rl-run-1.md) - what the 200-step log does and does not show
+* [Engineering pitfalls](/observations/pitfalls.md) - failures, causes and fixes
+
+# Status
+* [Open questions](/open-questions.md) - missing measurements and untested code
+
+# Paper
+* [Methods notes](/paper/methods-notes.md) - reusable prose, parameters and caveats for a methods section
+
+# History
+* [Log](/log.md) - dated record of changes to this bundle and the code
