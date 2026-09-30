@@ -53,7 +53,8 @@ def fit_mean_mse(z_L: torch.Tensor, z_H: torch.Tensor) -> dict[str, float]:
     }
 
 
-def fit_injection_scale_p75(verbalizer_model: str, sample_texts: list[str], device: str = "cpu") -> float:
+def fit_injection_scale_p75(verbalizer_model: str, sample_texts: list[str], device: str = "cpu",
+                             dtype: torch.dtype = torch.float32) -> float:
     """75th-percentile per-token residual-stream norm of the verbalizer's LAST
     hidden layer, over `sample_texts`. Used to init the injection adapter's
     scale "large" (original NLA heuristic: injected vectors should land near
@@ -62,11 +63,12 @@ def fit_injection_scale_p75(verbalizer_model: str, sample_texts: list[str], devi
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     tok = AutoTokenizer.from_pretrained(verbalizer_model)
-    model = AutoModelForCausalLM.from_pretrained(verbalizer_model, torch_dtype=torch.float32).to(device).eval()
+    model = AutoModelForCausalLM.from_pretrained(verbalizer_model, torch_dtype=dtype).to(device).eval()
     norms = []
     with torch.no_grad():
-        for text in sample_texts:
-            ids = tok(text, return_tensors="pt", truncation=True, max_length=512).to(device)
+        for i, text in enumerate(sample_texts):
+            print(f"  injection-scale sample {i + 1}/{len(sample_texts)}", flush=True)
+            ids = tok(text, return_tensors="pt", truncation=True, max_length=256).to(device)
             out = model(**ids, output_hidden_states=True)
             h = out.hidden_states[-1][0]  # [T, d]
             norms.append(h.float().norm(dim=-1))
@@ -81,14 +83,15 @@ def main() -> None:
     p.add_argument("--max-rows", type=int, default=100_000)
     p.add_argument("--verbalizer-model", default="Qwen/Qwen2.5-1.5B-Instruct")
     p.add_argument("--skip-injection-scale", action="store_true")
-    p.add_argument("--injection-scale-n-samples", type=int, default=64)
+    p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    p.add_argument("--injection-scale-n-samples", type=int, default=32)
     p.add_argument("--output", required=True, help="output JSON path")
     args = p.parse_args()
 
     z_L_np, z_H_np = _load_zLzH(args.train_parquet, args.max_rows)
     z_L, z_H = torch.from_numpy(z_L_np), torch.from_numpy(z_H_np)
     mean_mse = fit_mean_mse(z_L, z_H)
-    print(f"mean_mse: sum={mean_mse['sum']:.4f} L={mean_mse['L']:.4f} H={mean_mse['H']:.4f} (n={z_L.shape[0]})")
+    print(f"mean_mse: sum={mean_mse['sum']:.4f} L={mean_mse['L']:.4f} H={mean_mse['H']:.4f} (n={z_L.shape[0]})", flush=True)
 
     injection_scale_p75 = None
     if not args.skip_injection_scale:
@@ -99,7 +102,9 @@ def main() -> None:
                 col = pf.read(columns=["context_marked"]).column("context_marked").to_pylist()
                 texts += [c.replace("⟦", "").replace("⟧", "") for c in col[: args.injection_scale_n_samples]]
         texts = texts[: args.injection_scale_n_samples] or ["The quick brown fox jumps over the lazy dog."]
-        injection_scale_p75 = fit_injection_scale_p75(args.verbalizer_model, texts)
+        injection_scale_p75 = fit_injection_scale_p75(
+            args.verbalizer_model, texts, args.device,
+            torch.bfloat16 if args.device.startswith("cuda") else torch.float32)
         print(f"injection_scale_p75 ({args.verbalizer_model}): {injection_scale_p75:.2f}")
 
     out = {
