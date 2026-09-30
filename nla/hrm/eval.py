@@ -158,7 +158,8 @@ def summarize(results: list[dict], weights: ReconWeights, mean_mse: dict | None)
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--eval-parquet", action="append", required=True, help="name=path, repeatable")
+    p.add_argument("--eval-parquet", action="append", nargs="+", required=True,
+                    help="name=path; several per flag (--eval-parquet a=x.parquet b=y.parquet) or repeat the flag")
     p.add_argument("--av-ckpt", required=True)
     p.add_argument("--ar-ckpt", required=True)
     p.add_argument("--verbalizer-model", default=None)
@@ -189,7 +190,7 @@ def main() -> None:
         open(args.dump_samples, "w").close()  # truncate once; each split appends
     report: dict = {"splits": {}}
     all_results: dict[str, list[dict]] = {}
-    for spec in args.eval_parquet:
+    for spec in [spec for group in args.eval_parquet for spec in group]:
         name, path = spec.split("=", 1)
         rows = pq.read_table(path).to_pylist()
         meta = read_sidecar(LocalStorage(), path)
