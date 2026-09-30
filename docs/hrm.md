@@ -343,7 +343,9 @@ python -m nla.hrm.train_rl --rl-parquet rl.parquet --eval-parquet eval_iid.parqu
     --batch-size 32 --group-size 8 --max-new-tokens 300 --steps 500 \
     --sanity --output ckpt/rl
 ```
-(`configs/hrm/rl.sh` wraps these with the same defaults.)
+`--micro-batch-size` (default 8) is the memory knob: rollouts per forward/backward pass
+(results are identical, it only changes peak memory). If you still hit OOM, lower it, and/or
+lower `--batch-size`/`--group-size`. `configs/hrm/rl.sh` wraps these with the same defaults.
 
 **10. Evaluate** (report + Mimir patch-back judge; loads Mimir, so run it on the GPU).
 Pass the same checkpoint dir for AV and AR when evaluating an RL checkpoint.

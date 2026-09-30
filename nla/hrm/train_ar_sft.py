@@ -90,7 +90,7 @@ def main() -> None:
     model.train()
     for epoch in range(args.epochs):
         for input_ids, attn, targets, heads_batch in tqdm(loader, desc=f"epoch {epoch}"):
-            out = model(input_ids=input_ids, attention_mask=attn, output_hidden_states=True)
+            out = model(input_ids=input_ids, attention_mask=attn, output_hidden_states=True, logits_to_keep=1)
             h_last_all = out.hidden_states[-1]
             lengths = attn.sum(dim=1) - 1  # last real token index per row
             h_last = h_last_all[torch.arange(h_last_all.shape[0]), lengths]

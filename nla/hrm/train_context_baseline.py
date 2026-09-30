@@ -79,7 +79,7 @@ def main() -> None:
         for start in tqdm(range(0, len(rows), args.batch_size), desc=f"epoch {epoch}"):
             batch = [rows[i] for i in order[start : start + args.batch_size]]
             ids, attn, z_L, z_H = _collate(batch, tokenizer, args.device)
-            out = model(input_ids=ids, attention_mask=attn, output_hidden_states=True)
+            out = model(input_ids=ids, attention_mask=attn, output_hidden_states=True, logits_to_keep=1)
             lengths = attn.sum(dim=1) - 1
             h_last = out.hidden_states[-1][torch.arange(ids.shape[0]), lengths]
             zL_hat, zH_hat = heads.forward_L(h_last), heads.forward_H(h_last)

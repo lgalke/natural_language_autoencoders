@@ -39,7 +39,7 @@ from nla.hrm.model import (
     DEFAULT_VERBALIZER, add_frozen_reference_adapter, build_inputs_embeds,
     load_rl_checkpoint, load_verbalizer, save_extra_modules,
 )
-from nla.hrm.recon import ReconWeights, failed_reward, loss_to_reward, parse_fields, recon_loss
+from nla.hrm.recon import ReconLoss, ReconWeights, failed_reward, loss_to_reward, parse_fields, recon_loss
 from nla.hrm.sidecar import HrmDatasetMeta, read_sidecar
 
 _D_MIMIR = 1536
@@ -90,14 +90,26 @@ def _generate_batch(model, tokenizer, rows, inj_l_char, inj_h_char, inj_L, inj_H
     return full_ids, full_attn, S, texts, z_L, z_H
 
 
+# Micro-batch size for every forward pass that needs a backward (policy step, AR update)
+# and for no-grad scoring. Set from --micro-batch-size in main(). Full-vocab logits and
+# activations for all B*G rollouts at once are what used to OOM a 95 GB GPU.
+_MICRO_BATCH = 8
+
+
 def _critic_hidden(model, tokenizer, texts: list[str], device: str) -> torch.Tensor:
     model.set_adapter("ar")
     enc = tokenizer(texts, return_tensors="pt", padding=True, add_special_tokens=False,
                      truncation=True, max_length=512)
     ids, attn = enc["input_ids"].to(device), enc["attention_mask"].to(device)
-    out = model(input_ids=ids, attention_mask=attn, output_hidden_states=True)
+    # logits_to_keep=1: we only need hidden states; don't build [B, T, vocab] logits.
+    out = model(input_ids=ids, attention_mask=attn, output_hidden_states=True, logits_to_keep=1)
     lengths = attn.sum(dim=1) - 1
     return out.hidden_states[-1][torch.arange(ids.shape[0]), lengths]
+
+
+def _critic_hidden_nograd(model, tokenizer, texts: list[str], device: str) -> torch.Tensor:
+    return torch.cat([_critic_hidden(model, tokenizer, texts[i : i + _MICRO_BATCH], device)
+                      for i in range(0, len(texts), _MICRO_BATCH)])
 
 
 def compute_rewards(model, tokenizer, heads, critic_template, texts, z_L, z_H, weights, device, log_reward: bool):
@@ -111,8 +123,8 @@ def compute_rewards(model, tokenizer, heads, critic_template, texts, z_L, z_H, w
         l_texts = [critic_template.format(explanation=parsed[i][0]) for i in ok_idx]
         h_texts = [critic_template.format(explanation=parsed[i][1]) for i in ok_idx]
         with torch.no_grad():
-            h_l = _critic_hidden(model, tokenizer, l_texts, device)
-            h_h = _critic_hidden(model, tokenizer, h_texts, device)
+            h_l = _critic_hidden_nograd(model, tokenizer, l_texts, device)
+            h_h = _critic_hidden_nograd(model, tokenizer, h_texts, device)
             zL_hat, zH_hat = heads.forward_L(h_l), heads.forward_H(h_h)
             gold_L, gold_H = z_L[ok_idx], z_H[ok_idx]
             for j, i in enumerate(ok_idx):
@@ -127,49 +139,61 @@ def ar_update_step(model, tokenizer, heads, heads_optim, critic_template, parsed
     ok_idx = [i for i, p in enumerate(parsed) if p is not None]
     if not ok_idx:
         return None
-    l_texts = [critic_template.format(explanation=parsed[i][0]) for i in ok_idx]
-    h_texts = [critic_template.format(explanation=parsed[i][1]) for i in ok_idx]
-    h_l = _critic_hidden(model, tokenizer, l_texts, device)
-    h_h = _critic_hidden(model, tokenizer, h_texts, device)
-    zL_hat, zH_hat = heads.forward_L(h_l), heads.forward_H(h_h)
-    loss = recon_loss(zL_hat, zH_hat, z_L[ok_idx], z_H[ok_idx], weights)
     heads_optim.zero_grad()
-    loss.total.backward()
+    n = len(ok_idx)
+    tot = mse_sum = mse_L = mse_H = 0.0
+    for start in range(0, n, _MICRO_BATCH):
+        idx = ok_idx[start : start + _MICRO_BATCH]
+        l_texts = [critic_template.format(explanation=parsed[i][0]) for i in idx]
+        h_texts = [critic_template.format(explanation=parsed[i][1]) for i in idx]
+        h_l = _critic_hidden(model, tokenizer, l_texts, device)
+        h_h = _critic_hidden(model, tokenizer, h_texts, device)
+        loss = recon_loss(heads.forward_L(h_l), heads.forward_H(h_h), z_L[idx], z_H[idx], weights)
+        w = len(idx) / n  # chunk means -> full-batch mean
+        (loss.total * w).backward()
+        tot += loss.total.item() * w
+        mse_sum += loss.mse_sum.item() * w
+        mse_L += loss.mse_L.item() * w
+        mse_H += loss.mse_H.item() * w
     heads_optim.step()
-    return loss
+    return ReconLoss(total=torch.tensor(tot), mse_sum=torch.tensor(mse_sum),
+                     mse_L=torch.tensor(mse_L), mse_H=torch.tensor(mse_H))
+
+
+def _response_logprobs(model, adapter: str, embeds, attn, targets, S: int) -> torch.Tensor:
+    """log p(token) for the response positions only. logits_to_keep restricts the LM head
+    to positions S-1..end, so we never build [N, seq, vocab] logits for the prompt."""
+    model.set_adapter(adapter)
+    k = embeds.shape[1] - S + 1
+    logits = model(inputs_embeds=embeds, attention_mask=attn, logits_to_keep=k).logits[:, :-1]
+    return torch.log_softmax(logits.float(), dim=-1).gather(-1, targets.unsqueeze(-1)).squeeze(-1)
 
 
 def policy_step(model, full_ids, full_attn, S, advantages, inj_L, inj_H, ids_meta, z_L, z_H, policy_optim,
                  kl_beta: float, device):
-    embeds = build_inputs_embeds(model, full_ids, z_L, z_H, inj_L, inj_H, *ids_meta)
-    model.set_adapter("av")
-    logits_policy = model(inputs_embeds=embeds, attention_mask=full_attn).logits
-    with torch.no_grad():
-        model.set_adapter("av_ref")
-        logits_ref = model(inputs_embeds=embeds, attention_mask=full_attn).logits
-    model.set_adapter("av")
-
-    logp_policy = torch.log_softmax(logits_policy[:, :-1].float(), dim=-1)
-    logp_policy = logp_policy.gather(-1, full_ids[:, 1:].unsqueeze(-1)).squeeze(-1)
-    logp_ref = torch.log_softmax(logits_ref[:, :-1].float(), dim=-1)
-    logp_ref = logp_ref.gather(-1, full_ids[:, 1:].unsqueeze(-1)).squeeze(-1)
-
-    response_mask = full_attn[:, 1:].clone().float()
-    response_mask[:, : S - 1] = 0.0  # only score response-token predictions
-    denom = response_mask.sum(-1).clamp_min(1.0)
-
-    token_logratio = logp_policy - logp_ref.detach()
-    kl_per_sample = (0.5 * token_logratio.pow(2) * response_mask).sum(-1) / denom
-    resp_logp_mean = (logp_policy * response_mask).sum(-1) / denom
-
-    pg_loss = -(advantages.to(device) * resp_logp_mean).mean()
-    kl_loss = kl_per_sample.mean()
-    loss = pg_loss + kl_beta * kl_loss
-
+    N = full_ids.shape[0]
     policy_optim.zero_grad()
-    loss.backward()
+    pg_total = kl_total = 0.0
+    for start in range(0, N, _MICRO_BATCH):
+        sl = slice(start, start + _MICRO_BATCH)
+        ids, attn = full_ids[sl], full_attn[sl]
+        targets, resp_mask = ids[:, S:], attn[:, S:].float()
+        embeds = build_inputs_embeds(model, ids, z_L[sl], z_H[sl], inj_L, inj_H, *ids_meta)
+        with torch.no_grad():
+            logp_ref = _response_logprobs(model, "av_ref", embeds, attn, targets, S)
+        logp = _response_logprobs(model, "av", embeds, attn, targets, S)
+
+        denom = resp_mask.sum(-1).clamp_min(1.0)
+        kl = ((0.5 * (logp - logp_ref).pow(2) * resp_mask).sum(-1) / denom)
+        resp_logp_mean = (logp * resp_mask).sum(-1) / denom
+        pg = -(advantages[sl].to(device) * resp_logp_mean)
+        w = ids.shape[0] / N
+        ((pg.mean() + kl_beta * kl.mean()) * w).backward()
+        pg_total += pg.mean().item() * w
+        kl_total += kl.mean().item() * w
     policy_optim.step()
-    return pg_loss.item(), kl_loss.item()
+    model.set_adapter("av")
+    return pg_total, kl_total
 
 
 def main() -> None:
@@ -183,6 +207,8 @@ def main() -> None:
     p.add_argument("--dtype", choices=["float32", "bfloat16"], default=default_dtype())
     p.add_argument("--batch-size", type=int, default=8, help="B activation rows per step")
     p.add_argument("--group-size", type=int, default=8, help="G rollouts per row (GRPO group)")
+    p.add_argument("--micro-batch-size", type=int, default=8,
+                    help="rollouts per forward/backward pass (memory knob; results are identical)")
     p.add_argument("--max-new-tokens", type=int, default=300)
     p.add_argument("--temperature", type=float, default=1.0)
     p.add_argument("--steps", type=int, default=200)
@@ -201,6 +227,8 @@ def main() -> None:
     verbalizer_model = args.verbalizer_model or DEFAULT_VERBALIZER
     dtype = {"float32": torch.float32, "bfloat16": torch.bfloat16}[args.dtype]
     weights = ReconWeights(w_sum=args.w_sum, w_comp=args.w_comp)
+    global _MICRO_BATCH
+    _MICRO_BATCH = args.micro_batch_size
 
     model, tokenizer = load_verbalizer(verbalizer_model, device=args.device, torch_dtype=dtype)
     d_verb = model.config.hidden_size
@@ -301,7 +329,9 @@ def _run_sanity_check(model, tokenizer, rows, inj_l_char, inj_h_char, inj_L, inj
         model, tokenizer, rows, inj_l_char, inj_h_char, inj_L, inj_H, ids_meta, device, 1, 200, 1.0
     )
     rewards_real, _ = compute_rewards(model, tokenizer, heads, critic_template, texts, z_L, z_H, weights, device, log_reward)
-    perm = torch.randperm(z_L.shape[0])
+    # roll by one: a guaranteed non-identity shuffle (randperm is the identity with prob 1/N!,
+    # which made tiny-batch sanity checks report real == shuffled)
+    perm = torch.roll(torch.arange(z_L.shape[0]), 1)
     rewards_shuf, _ = compute_rewards(model, tokenizer, heads, critic_template, texts, z_L[perm], z_H[perm],
                                         weights, device, log_reward)
     r_real, r_shuf = sum(rewards_real) / len(rewards_real), sum(rewards_shuf) / len(rewards_shuf)

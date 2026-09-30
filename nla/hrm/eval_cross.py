@@ -105,7 +105,7 @@ def _train_and_eval_probe(model, tokenizer, train_pairs, test_pairs, source: str
             enc = tokenizer(texts, return_tensors="pt", padding=True, add_special_tokens=False,
                               truncation=True, max_length=512)
             ids, attn = enc["input_ids"].to(device), enc["attention_mask"].to(device)
-            out = model(input_ids=ids, attention_mask=attn, output_hidden_states=True)
+            out = model(input_ids=ids, attention_mask=attn, output_hidden_states=True, logits_to_keep=1)
             lengths = attn.sum(dim=1) - 1
             h_last = out.hidden_states[-1][torch.arange(ids.shape[0]), lengths]
             pred = head(h_last)
@@ -118,13 +118,15 @@ def _train_and_eval_probe(model, tokenizer, train_pairs, test_pairs, source: str
     test_texts = _probe_texts(test_pairs, source)
     test_targets = torch.tensor([p[target] for p in test_pairs], dtype=torch.float32).to(device)
     with torch.no_grad():
-        enc = tokenizer(test_texts, return_tensors="pt", padding=True, add_special_tokens=False,
-                          truncation=True, max_length=512)
-        ids, attn = enc["input_ids"].to(device), enc["attention_mask"].to(device)
-        out = model(input_ids=ids, attention_mask=attn, output_hidden_states=True)
-        lengths = attn.sum(dim=1) - 1
-        h_last = out.hidden_states[-1][torch.arange(ids.shape[0]), lengths]
-        pred = head(h_last)
+        preds = []
+        for i in range(0, len(test_texts), batch_size):
+            enc = tokenizer(test_texts[i : i + batch_size], return_tensors="pt", padding=True,
+                              add_special_tokens=False, truncation=True, max_length=512)
+            ids, attn = enc["input_ids"].to(device), enc["attention_mask"].to(device)
+            out = model(input_ids=ids, attention_mask=attn, output_hidden_states=True, logits_to_keep=1)
+            lengths = attn.sum(dim=1) - 1
+            preds.append(head(out.hidden_states[-1][torch.arange(ids.shape[0]), lengths]))
+        pred = torch.cat(preds)
         pred_n, target_n = normalize_activation(pred, scale), normalize_activation(test_targets, scale)
         mse = ((pred_n - target_n) ** 2).mean().item()
         mu = normalize_activation(train_targets.to(device), scale).mean(0, keepdim=True)

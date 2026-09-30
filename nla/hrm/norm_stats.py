@@ -70,7 +70,7 @@ def fit_injection_scale_p75(verbalizer_model: str, sample_texts: list[str], devi
         for i, text in enumerate(sample_texts):
             print(f"  injection-scale sample {i + 1}/{len(sample_texts)}", flush=True)
             ids = tok(text, return_tensors="pt", truncation=True, max_length=256).to(device)
-            out = model(**ids, output_hidden_states=True)
+            out = model(**ids, output_hidden_states=True, logits_to_keep=1)
             h = out.hidden_states[-1][0]  # [T, d]
             norms.append(h.float().norm(dim=-1))
     all_norms = torch.cat(norms).numpy()

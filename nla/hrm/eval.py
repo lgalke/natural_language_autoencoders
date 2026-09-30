@@ -74,7 +74,7 @@ def generate_and_reconstruct(model, tokenizer, rows, inj_l_char, inj_h_char, inj
             c_enc = tokenizer(l_texts + h_texts, return_tensors="pt", padding=True,
                                 add_special_tokens=False, truncation=True, max_length=512)
             c_ids, c_attn = c_enc["input_ids"].to(device), c_enc["attention_mask"].to(device)
-            c_out = model(input_ids=c_ids, attention_mask=c_attn, output_hidden_states=True)
+            c_out = model(input_ids=c_ids, attention_mask=c_attn, output_hidden_states=True, logits_to_keep=1)
             lengths = c_attn.sum(dim=1) - 1
             h_last = c_out.hidden_states[-1][torch.arange(c_ids.shape[0]), lengths]
             from nla.hrm.model import ReconHeads
