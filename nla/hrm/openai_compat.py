@@ -84,3 +84,16 @@ class OpenAICompatProvider(CompletionProvider):
         if n_none:
             print(f"  [OpenAICompatProvider] {n_none}/{len(prompts)} completions failed/empty")
         return out
+
+
+class UCloudGLMProvider(OpenAICompatProvider):
+    """UCloud-hosted GLM with the defaults we want for explanations: LOW
+    reasoning effort (the server default is "max", which is slow and can eat
+    the whole token budget before the answer), key from $UCLOUD_API_KEY / ./.env.
+    Override anything via --provider-kwargs, e.g. '{"model": "zai-org/GLM-5.3-Flash"}'."""
+
+    def __init__(self, base_url: str = "https://ai.cloud.sdu.dk/v1", model: str = "zai-org/GLM-5.3",
+                 api_key_env: str = "UCLOUD_API_KEY", reasoning_effort: str | None = "low",
+                 max_tokens: int = 2000, **kwargs):
+        super().__init__(base_url=base_url, model=model, api_key_env=api_key_env,
+                         reasoning_effort=reasoning_effort, max_tokens=max_tokens, **kwargs)

@@ -66,7 +66,10 @@ def main() -> None:
     assert in_meta.stage == "base", f"expected stage=base, got stage={in_meta.stage!r}"
 
     provider_kwargs = parse_kwargs(args.provider_kwargs)
-    provider_kwargs.setdefault("max_tokens", 400)
+    # The HRM template runs longer than AnthropicProvider's 300-token default; other
+    # providers (e.g. UCloudGLMProvider) carry their own, larger defaults — don't override.
+    if args.provider_cls.endswith("AnthropicProvider"):
+        provider_kwargs.setdefault("max_tokens", 400)
     provider: CompletionProvider = load_class(args.provider_cls)(**provider_kwargs)
 
     table = pq.read_table(storage.open_read(args.input))
