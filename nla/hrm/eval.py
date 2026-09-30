@@ -178,6 +178,9 @@ def main() -> None:
                     help="evaluate only a random sample of N rows per split (quick check; seeded, reproducible)")
     p.add_argument("--dump-samples", default=None,
                     help="write one JSON line per eval row (context, completion, L/H fields, per-row FVE) to this path")
+    p.add_argument("--mean-from", default=None,
+                    help="parquet with z_L/z_H (e.g. rl.parquet) to compute the mean-ablation baselines for the judge "
+                         "(adds 'fraction of KL recovered'); strongly recommended with --run-judge")
     p.add_argument("--run-judge", action="store_true")
     p.add_argument("--base-model", default=None)
     p.add_argument("--output", required=True)
@@ -238,6 +241,14 @@ def main() -> None:
         from nla.hrm.mimir import DEFAULT_MIMIR, load_mimir
         mimir_model, mimir_tok = load_mimir(args.base_model or DEFAULT_MIMIR, device=args.device, torch_dtype=dtype)
         report["judge"] = {}
+        mean_s = mean_zH = None
+        if args.mean_from:
+            t = pq.read_table(args.mean_from, columns=["z_L", "z_H"]).slice(0, 20000)
+            zl = torch.tensor(t.column("z_L").to_pylist(), dtype=torch.float32)
+            zh = torch.tensor(t.column("z_H").to_pylist(), dtype=torch.float32)
+            mean_s, mean_zH = (zl + zh).mean(0), zh.mean(0)
+        else:
+            print("  [judge] no --mean-from: skipping mean-ablation baselines (no 'fraction of KL recovered')")
         for name, results in all_results.items():
             ok = [r for r in results if r["parsed"] is not None]
             if not ok:
@@ -245,10 +256,21 @@ def main() -> None:
             judge_rows = [r["row"] for r in ok]
             zL_hat = torch.stack([r["z_L_hat"] for r in ok])
             zH_hat = torch.stack([r["z_H_hat"] for r in ok])
-            j = run_judge(mimir_model, mimir_tok, judge_rows, zL_hat, zH_hat, args.device)
+            j = run_judge(mimir_model, mimir_tok, judge_rows, zL_hat, zH_hat, args.device, mean_s, mean_zH)
             report["judge"][name] = j
             import statistics
-            print(f"[judge:{name}] KL at patch pos mean={statistics.mean(j['primary']['kl_pred_at_patch']):.4f}")
+            pr = j["primary"]
+            msg = (f"[judge:{name}] sum-patch KL at position mean={statistics.mean(pr['kl_pred_at_patch']):.4f} "
+                   f"(noise floor, stored gold: {statistics.mean(pr['kl_true_at_patch']):.4f})")
+            if "frac_kl_recovered" in pr:
+                fr = [v for v in pr["frac_kl_recovered"] if v == v]
+                msg += f"  fraction of KL recovered vs mean-ablation: {statistics.mean(fr):.3f}" if fr else ""
+            sec = j["secondary_zH"]
+            msg += f"  | z_H-only patch KL mean={statistics.mean(sec['kl_pred_at_patch']):.4f}"
+            if "frac_kl_recovered" in sec:
+                fr = [v for v in sec["frac_kl_recovered"] if v == v]
+                msg += f" recovered={statistics.mean(fr):.3f}" if fr else ""
+            print(msg)
 
     with open(args.output, "w") as f:
         json.dump(report, f, indent=2, default=lambda o: o.tolist() if hasattr(o, "tolist") else str(o))

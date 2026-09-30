@@ -130,7 +130,7 @@ def run_judge(
     s_gold = z_L_gold + z_H_gold
     s_hat = z_L_hat.to(device) + z_H_hat.to(device)
 
-    def _forward() -> torch.Tensor:
+    def _forward(want_capture: bool = False):
         # Any active HrmH2Patcher patch is applied via ITS OWN already-
         # registered hooks (module docstring above) — this just runs the
         # forward pass and wraps a fresh HrmStreamCapture around it purely
@@ -140,10 +140,15 @@ def run_judge(
         out = model(input_ids=input_ids, attention_mask=attn, token_type_ids=token_type_ids, use_cache=False)
         cap.verify_call_counts()
         cap.close()
-        return out.logits.float()
+        return (out.logits.float(), cap) if want_capture else out.logits.float()
 
     # --- correctness check + clean baseline ---
-    logits_clean = _forward()
+    logits_clean, clean_cap = _forward(want_capture=True)
+    b_all = torch.arange(n, device=device)
+    s_recomputed = clean_cap.h_in_target[b_all, positions]   # H_in@2 as computed in THIS pass
+    zH_recomputed = clean_cap.z_H[b_all, positions]
+    bf16 = next(model.parameters()).dtype != torch.float32
+    tol_soft = 5e-2 if bf16 else 1e-4   # stored-vs-recomputed drift: bf16 rounding differs between batch compositions
 
     def _kl_at(logits_a: torch.Tensor, logits_b: torch.Tensor, pos: torch.Tensor) -> torch.Tensor:
         b_idx = torch.arange(logits_a.shape[0])
@@ -155,13 +160,25 @@ def run_judge(
     results: dict = {}
 
     with HrmH2Patcher(model) as patcher:
-        # correctness check: patching in the TRUE s must reproduce clean logits.
-        patcher.set_patch_h2(positions, s_gold)
-        logits_true = _forward()
-        kl_true = _kl_at(logits_clean, logits_true, positions)
-        assert kl_true.max().item() < 1e-4, (
-            f"patching the TRUE s did not reproduce clean logits (max KL={kl_true.max().item():.2e}) — "
+        # (a) mechanism check: patching back the vector RECOMPUTED in this very pass must
+        # reproduce the clean logits exactly — this is what tests the patch hook itself.
+        patcher.set_patch_h2(positions, s_recomputed)
+        kl_mech = _kl_at(logits_clean, _forward(), positions)
+        assert kl_mech.max().item() < 1e-4, (
+            f"patching back the recomputed s did not reproduce clean logits (max KL={kl_mech.max().item():.2e}) — "
             f"patch mechanism or hook-site assumption is wrong, distrust everything below."
+        )
+        # (b) noise floor: the STORED gold s came from the extraction run (different batch
+        # composition/padding), so in bf16 it differs from the recomputed one by rounding noise.
+        # Reconstruction KLs must be read against this floor.
+        patcher.set_patch_h2(positions, s_gold)
+        kl_true = _kl_at(logits_clean, _forward(), positions)
+        if kl_true.max().item() > tol_soft:
+            print(f"  [judge] WARNING: stored gold s drifts from recomputed (max KL={kl_true.max().item():.2e} > {tol_soft:.0e}); "
+                  f"stored vectors may come from a different dtype/renderer than this judge run.")
+        assert kl_true.max().item() < 0.25, (
+            f"stored gold s is far from the recomputed one (max KL={kl_true.max().item():.2e}): wrong prompt_ids/"
+            f"position columns or an extraction/judge dtype mismatch."
         )
 
         patcher.set_patch_h2(positions, s_hat)
@@ -170,7 +187,9 @@ def run_judge(
         kl_pred_at_last = _kl_at(logits_clean, logits_pred, last_positions)
 
         results["primary"] = {
-            "kl_true_at_patch_max": kl_true.max().item(),  # correctness check, expect ~0
+            "kl_mechanism_max": kl_mech.max().item(),  # recomputed-vector patch, expect ~0
+            "kl_true_at_patch_max": kl_true.max().item(),  # stored-gold noise floor (bf16 rounding)
+            "kl_true_at_patch": kl_true.tolist(),
             "kl_pred_at_patch": kl_pred_at_patch.tolist(),
             "kl_pred_at_last": kl_pred_at_last.tolist(),
         }
@@ -189,17 +208,19 @@ def run_judge(
 
         # --- secondary: patch z_H alone at H_out@1, let cycle 2 run normally ---
         patcher.clear()
-        patcher.set_patch_h1(positions, z_H_gold)
-        logits_true_h = _forward()
-        kl_true_h = _kl_at(logits_clean, logits_true_h, positions)
-        assert kl_true_h.max().item() < 1e-4, (
-            f"patching the TRUE z_H did not reproduce clean logits (max KL={kl_true_h.max().item():.2e})"
+        patcher.set_patch_h1(positions, zH_recomputed)
+        kl_mech_h = _kl_at(logits_clean, _forward(), positions)
+        assert kl_mech_h.max().item() < 1e-4, (
+            f"patching back the recomputed z_H did not reproduce clean logits (max KL={kl_mech_h.max().item():.2e})"
         )
+        patcher.set_patch_h1(positions, z_H_gold)
+        kl_true_h = _kl_at(logits_clean, _forward(), positions)
 
         patcher.set_patch_h1(positions, z_H_hat.to(device))
         logits_pred_h = _forward()
         kl_pred_h_at_patch = _kl_at(logits_clean, logits_pred_h, positions)
         results["secondary_zH"] = {
+            "kl_mechanism_max": kl_mech_h.max().item(),
             "kl_true_at_patch_max": kl_true_h.max().item(),
             "kl_pred_at_patch": kl_pred_h_at_patch.tolist(),
         }

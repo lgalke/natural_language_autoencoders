@@ -29,6 +29,8 @@ timestamp: 2026-09-30
 
 # Pipeline bookkeeping
 
+- **Judge assertion too strict in bf16.** "Patching the TRUE s reproduces clean logits (KL < 1e-4)" failed on GPU with max KL 9e-3: stored gold vectors come from a differently batched extraction pass, so bf16 rounding differs. The mechanism check now uses vectors recomputed in the same pass, and the stored-gold discrepancy is reported as a noise floor ([judge](/decisions/judge-design.md)).
+
 - **GPU-only crash after a full eval generation.** Reconstructions stayed on the GPU while the gold vectors were built on CPU, so scoring crashed with a device mismatch after all rollouts had finished (invisible in CPU smoke tests). Fixed at the source (reconstructions are stored on CPU; `recon_loss` aligns devices), and `eval` now saves generations to `<output>.gen_<split>.pt` right after rollout; rerun with `--reuse-generations` to redo only scoring, dumps and judge.
 
 - **`judge_subset.parquet` had no sidecar.** `split.py` wrote the file but not its `.nla_meta.yaml`, so `build.py` failed to read it. Fixed in `split.py`; for splits made earlier, copy the `eval_iid` sidecar and fix `dataset_id` and `row_count`.
