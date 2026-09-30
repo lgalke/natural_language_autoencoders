@@ -243,7 +243,9 @@ python -m nla.hrm.explain --input splits/ar_sft.parquet --output splits/ar_sft_e
 python -m nla.hrm.build --input splits/ar_sft_explained.parquet --stage ar_sft --output ar_sft.parquet
 python -m nla.hrm.build --input splits/av_sft_explained.parquet --stage av_sft --output av_sft.parquet
 python -m nla.hrm.build --input splits/rl.parquet --stage rl --output rl.parquet
-python -m nla.hrm.build --input splits/eval_ood.parquet --stage rl --output eval_ood.parquet
+for s in eval_iid eval_ood judge_subset; do
+  python -m nla.hrm.build --input splits/$s.parquet --stage rl --output $s.parquet
+done
 
 python -m nla.hrm.train_ar_sft --train-parquet ar_sft.parquet --output ckpt/ar_sft
 python -m nla.hrm.train_av_sft --train-parquet av_sft.parquet --norm-stats-json norm_stats.json --output ckpt/av_sft
@@ -251,7 +253,7 @@ python -m nla.hrm.train_rl --rl-parquet rl.parquet --av-sft-ckpt ckpt/av_sft --a
     --sanity --output ckpt/rl
 
 python -m nla.hrm.judge --eval-parquet eval_ood.parquet --reconstructions recon.json --output judge.json
-python -m nla.hrm.eval --eval-parquet ood=eval_ood.parquet --av-ckpt ckpt/rl/final --ar-ckpt ckpt/rl/final \
+python -m nla.hrm.eval --eval-parquet iid=eval_iid.parquet ood=eval_ood.parquet --av-ckpt ckpt/rl/final --ar-ckpt ckpt/rl/final \
     --run-judge --output eval_report.json
 ```
 
