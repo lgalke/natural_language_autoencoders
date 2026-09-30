@@ -42,12 +42,16 @@ _D_MIMIR = 1536
 
 @torch.no_grad()
 def generate_and_reconstruct(model, tokenizer, rows, inj_l_char, inj_h_char, inj_L, inj_H, heads, ids_meta,
-                               critic_template, device, max_new_tokens=300, batch_size=16):
+                               critic_template, device, max_new_tokens=300, batch_size=16, shuffle_vectors=False):
     from nla.hrm.model import build_inputs_embeds
 
     out = []
+    # Control: inject the vectors of a DIFFERENT row (rolled by one) while still scoring against the
+    # original row's gold vectors. If FVE does not drop, the verbalizer is ignoring the vector.
+    inject_rows = rows[1:] + rows[:1] if shuffle_vectors else rows
     for start in tqdm(range(0, len(rows), batch_size), desc="rollout"):
         batch_rows = rows[start : start + batch_size]
+        inj_rows = inject_rows[start : start + batch_size]
         contents = [r["prompt"][0]["content"].replace(_INJECT_L_PLACEHOLDER, inj_l_char)
                     .replace(_INJECT_H_PLACEHOLDER, inj_h_char) for r in batch_rows]
         tokenizer.padding_side = "left"
@@ -56,8 +60,8 @@ def generate_and_reconstruct(model, tokenizer, rows, inj_l_char, inj_h_char, inj
             tokenize=True, add_generation_prompt=True, return_tensors="pt", return_dict=True, padding=True,
         )
         input_ids, attn = enc["input_ids"].to(device), enc["attention_mask"].to(device)
-        z_L = torch.tensor([r["z_L"] for r in batch_rows], dtype=torch.float32, device=device)
-        z_H = torch.tensor([r["z_H"] for r in batch_rows], dtype=torch.float32, device=device)
+        z_L = torch.tensor([r["z_L"] for r in inj_rows], dtype=torch.float32, device=device)
+        z_H = torch.tensor([r["z_H"] for r in inj_rows], dtype=torch.float32, device=device)
         embeds = build_inputs_embeds(model, input_ids, z_L, z_H, inj_L, inj_H, *ids_meta)
         model.set_adapter("av")
         gen_ids = model.generate(inputs_embeds=embeds, attention_mask=attn, max_new_tokens=max_new_tokens,
@@ -126,6 +130,7 @@ def summarize(results: list[dict], weights: ReconWeights, mean_mse: dict | None)
     fve = {"sum": [], "L": [], "H": []}
     overlaps, len_l, len_h = [], [], []
     cancel_hat, cos_hat = [], []
+    geo = {"cos_s": [], "cos_L": [], "cos_H": [], "norm_ratio_s": []}
     for r in ok:
         z_L = torch.tensor(r["row"]["z_L"], dtype=torch.float32).unsqueeze(0)
         z_H = torch.tensor(r["row"]["z_H"], dtype=torch.float32).unsqueeze(0)
@@ -140,6 +145,11 @@ def summarize(results: list[dict], weights: ReconWeights, mean_mse: dict | None)
         overlaps.append(_jaccard(l_field, h_field))
         len_l.append(len(l_field.split()))
         len_h.append(len(h_field.split()))
+        cos = torch.nn.functional.cosine_similarity
+        geo["cos_s"].append(cos(zL_hat + zH_hat, z_L + z_H).item())
+        geo["cos_L"].append(cos(zL_hat, z_L).item())
+        geo["cos_H"].append(cos(zH_hat, z_H).item())
+        geo["norm_ratio_s"].append(((zL_hat + zH_hat).norm() / (z_L + z_H).norm()).item())
         stats = compute_stream_stats(zL_hat, zH_hat)
         cancel_hat.append(stats["cancellation"].item())
         cos_hat.append(stats["cos_LH"].item())
@@ -152,6 +162,7 @@ def summarize(results: list[dict], weights: ReconWeights, mean_mse: dict | None)
         "fve_sum_mean": _mean(fve["sum"]), "fve_L_mean": _mean(fve["L"]), "fve_H_mean": _mean(fve["H"]),
         "lh_jaccard_mean": _mean(overlaps),  # near 1.0 = fields are near-duplicates (no differentiation)
         "l_field_words_mean": _mean(len_l), "h_field_words_mean": _mean(len_h),
+        **{f"geo_{k}_mean": _mean(v) for k, v in geo.items()},  # cosine to gold / norm ratio of the sum
         "cancellation_hat_mean": _mean(cancel_hat), "cos_LH_hat_mean": _mean(cos_hat),
     }
     return summary
@@ -174,6 +185,9 @@ def main() -> None:
     p.add_argument("--reuse-generations", action="store_true",
                     help="reuse <output>.gen_<split>.pt from an earlier run instead of regenerating "
                          "(generation is the slow part; it is always saved there right after it finishes)")
+    p.add_argument("--shuffle-vectors", action="store_true",
+                    help="CONTROL: inject another row's vectors (still score against the original gold). "
+                         "Compare its FVE to the normal run: no drop = the verbalizer ignores the vector")
     p.add_argument("--limit", type=int, default=None,
                     help="evaluate only a random sample of N rows per split (quick check; seeded, reproducible)")
     p.add_argument("--dump-samples", default=None,
@@ -210,7 +224,7 @@ def main() -> None:
         assert tm is not None
         ids_meta = (tm.injection_token_id_L, tm.injection_left_neighbor_id_L, tm.injection_right_neighbor_id_L,
                     tm.injection_token_id_H, tm.injection_left_neighbor_id_H, tm.injection_right_neighbor_id_H)
-        gen_path = f"{args.output}.gen_{name}.pt"
+        gen_path = f"{args.output}.gen_{name}{'_shuf' if args.shuffle_vectors else ''}.pt"
         if args.reuse_generations and Path(gen_path).exists():
             saved = torch.load(gen_path)
             assert len(saved) == len(rows), f"{gen_path} has {len(saved)} rows, split now has {len(rows)}; drop --reuse-generations"
@@ -219,7 +233,7 @@ def main() -> None:
         else:
             results = generate_and_reconstruct(model, tokenizer, rows, tm.injection_char_L, tm.injection_char_H,
                                                  inj_L, inj_H, heads, ids_meta, meta.prompt_templates["critic"], args.device,
-                                                 args.max_new_tokens, args.batch_size)
+                                                 args.max_new_tokens, args.batch_size, args.shuffle_vectors)
             torch.save([{k: v for k, v in r.items() if k != "row"} for r in results], gen_path)
         all_results[name] = results
         if args.dump_samples:
@@ -234,7 +248,9 @@ def main() -> None:
         }
         print(f"[{name}] n={summary['n']} format_rate={summary['format_rate']:.2%} "
               f"fve_sum={summary['fve_sum_mean']:.3f} fve_L={summary['fve_L_mean']:.3f} "
-              f"fve_H={summary['fve_H_mean']:.3f} lh_jaccard={summary['lh_jaccard_mean']:.3f}")
+              f"fve_H={summary['fve_H_mean']:.3f} lh_jaccard={summary['lh_jaccard_mean']:.3f}\n"
+              f"      geometry vs gold: cos(sum)={summary['geo_cos_s_mean']:.3f} cos(L)={summary['geo_cos_L_mean']:.3f} "
+              f"cos(H)={summary['geo_cos_H_mean']:.3f} |sum_hat|/|sum|={summary['geo_norm_ratio_s_mean']:.2f}")
 
     if args.run_judge:
         from nla.hrm.judge import run_judge
