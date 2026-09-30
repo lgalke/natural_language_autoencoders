@@ -1,4 +1,5 @@
 ## 2026-09-30
+* **Fixed**: `split.py` now writes the `judge_subset` sidecar; generated marker cache untracked; `eval --limit N` added; `preflight.py`, `AGENTS.md` and `opencode.json` added for handover to an opencode session on the cluster.
 * **Added**: this bundle (decisions, observations, open questions, methods notes).
 * **Verified**: hidden states of prompts in a padded batch equal those run alone (max difference 3.8e-6, CPU float32); see [PrefixLM](/decisions/prefixlm-rendering.md).
 * **Code**: `infer.py`, per-step FVE and sample dumps in `train_rl.py`, `eval --dump-samples`, multiple values per `--eval-parquet` flag.

@@ -27,6 +27,13 @@ timestamp: 2026-09-30
 - **Corpus builder.** MuSR's text column is `narrative`, not `context`; ProofWriter was not found; full non-streaming loads of large datasets are slow. Sources that fail are now skipped with a warning.
 - **Authentication.** The default Anthropic provider cannot use an OpenRouter or UCloud key and does not read `.env`. See [explanation teacher](/decisions/explanation-teacher.md).
 
+# Pipeline bookkeeping
+
+- **`judge_subset.parquet` had no sidecar.** `split.py` wrote the file but not its `.nla_meta.yaml`, so `build.py` failed to read it. Fixed in `split.py`; for splits made earlier, copy the `eval_iid` sidecar and fix `dataset_id` and `row_count`.
+- **`eval_iid.parquet` missing at eval time.** The early small example in the docs only built `eval_ood`; build all of `eval_iid`, `eval_ood`, `judge_subset` with `--stage rl`.
+- **Never re-run `split.py` on a dataset that already has trained checkpoints**: the world shuffle is reseeded per run and buckets change, so eval rows could leak into training.
+- **Generated marker cache committed by accident.** `nla/hrm/injection_token_cache_hrm.yaml` is machine-local and now git-ignored.
+
 # PEFT
 
 - `save_pretrained(path, selected_adapters=["av"])` writes `path/av/adapter_config.json`; only an adapter named `"default"` saves flat. Loading uses `nla/hrm/model.py:load_sft_adapter`.

@@ -10,3 +10,17 @@ dist/
 
 # generated per tokenizer/machine (markers picked+verified at build time); commit deliberately with `git add -f` if you want to pin it
 nla/hrm/injection_token_cache_hrm.yaml
+
+# pipeline artifacts written into the repo root when running docs/hrm.md from here (data, checkpoints, reports)
+/ckpt/
+/splits/
+/runs/
+/*.parquet
+/*.parquet.nla_meta.yaml
+/*.parquet.diagnostics*
+/corpus.jsonl
+/norm_stats.json
+/samples_*.jsonl
+/eval_*.json
+/judge*.json
+/recon.json
