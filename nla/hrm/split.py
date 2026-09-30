@@ -112,6 +112,10 @@ def main() -> None:
         for rb in judge_rows:
             jw.write_table(pa.Table.from_batches([rb]))
     n_judge = sum(rb.num_rows for rb in judge_rows)
+    write_sidecar(storage, judge_path, replace(
+        base_meta, dataset_id=f"{base_meta.dataset_id}__judge_subset", stage="base", row_count=n_judge,
+        parent_datasets=[base_meta.dataset_id], created_by="nla.hrm.split", created_at="", git_commit="",
+    ))
 
     for stage, bucket in world_buckets.items():
         sub_meta = replace(
