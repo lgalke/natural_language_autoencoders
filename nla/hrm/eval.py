@@ -23,6 +23,7 @@ produced) so doing both in one process avoids a JSON round-trip.
 
 import argparse
 import json
+from pathlib import Path
 
 import pyarrow.parquet as pq
 import torch
@@ -80,8 +81,8 @@ def generate_and_reconstruct(model, tokenizer, rows, inj_l_char, inj_h_char, inj
             n = len(ok_idx)
             zL_pred, zH_pred = heads.forward_L(h_last[:n]), heads.forward_H(h_last[n:])
             for j, i in enumerate(ok_idx):
-                zL_hat[i] = zL_pred[j]
-                zH_hat[i] = zH_pred[j]
+                zL_hat[i] = zL_pred[j].float().cpu()  # CPU: gold vectors live on CPU, avoids device mixing
+                zH_hat[i] = zH_pred[j].float().cpu()
 
         for i, r in enumerate(batch_rows):
             out.append({
@@ -170,6 +171,9 @@ def main() -> None:
     p.add_argument("--w-sum", type=float, default=1.0)
     p.add_argument("--w-comp", type=float, default=0.25)
     p.add_argument("--norm-stats-json", default=None)
+    p.add_argument("--reuse-generations", action="store_true",
+                    help="reuse <output>.gen_<split>.pt from an earlier run instead of regenerating "
+                         "(generation is the slow part; it is always saved there right after it finishes)")
     p.add_argument("--limit", type=int, default=None,
                     help="evaluate only a random sample of N rows per split (quick check; seeded, reproducible)")
     p.add_argument("--dump-samples", default=None,
@@ -203,9 +207,17 @@ def main() -> None:
         assert tm is not None
         ids_meta = (tm.injection_token_id_L, tm.injection_left_neighbor_id_L, tm.injection_right_neighbor_id_L,
                     tm.injection_token_id_H, tm.injection_left_neighbor_id_H, tm.injection_right_neighbor_id_H)
-        results = generate_and_reconstruct(model, tokenizer, rows, tm.injection_char_L, tm.injection_char_H,
-                                             inj_L, inj_H, heads, ids_meta, meta.prompt_templates["critic"], args.device,
-                                             args.max_new_tokens, args.batch_size)
+        gen_path = f"{args.output}.gen_{name}.pt"
+        if args.reuse_generations and Path(gen_path).exists():
+            saved = torch.load(gen_path)
+            assert len(saved) == len(rows), f"{gen_path} has {len(saved)} rows, split now has {len(rows)}; drop --reuse-generations"
+            results = [{"row": r, **g} for r, g in zip(rows, saved, strict=True)]
+            print(f"[{name}] reused {len(results)} saved generations from {gen_path}")
+        else:
+            results = generate_and_reconstruct(model, tokenizer, rows, tm.injection_char_L, tm.injection_char_H,
+                                                 inj_L, inj_H, heads, ids_meta, meta.prompt_templates["critic"], args.device,
+                                                 args.max_new_tokens, args.batch_size)
+            torch.save([{k: v for k, v in r.items() if k != "row"} for r in results], gen_path)
         all_results[name] = results
         if args.dump_samples:
             _dump_samples(args.dump_samples, name, results, weights, mean_mse)

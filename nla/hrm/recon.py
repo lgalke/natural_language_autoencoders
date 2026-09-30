@@ -103,6 +103,8 @@ def recon_loss(
     normalization frame, not its own, so the sum term stays a meaningful
     "did you predict what H reads" signal even for an off-scale prediction).
     """
+    # predictions may live on another device than the gold vectors (e.g. GPU rollouts vs CPU rows)
+    z_L_hat, z_H_hat = z_L_hat.to(z_L.device), z_H_hat.to(z_L.device)
     z_L_n, z_H_n, s_n = shared_normalize(z_L, z_H)
     scale = (z_L.float().pow(2).sum(-1, keepdim=True) + z_H.float().pow(2).sum(-1, keepdim=True)).clamp_min(1e-12).sqrt()
     z_L_hat_n = (z_L_hat.float() / scale).to(z_L_hat.dtype)
