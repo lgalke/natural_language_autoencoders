@@ -36,7 +36,9 @@ Proposal only. The v1 data (see [corpus and splits](/decisions/corpus-and-splits
 
 - The template tail beyond the last position is a small problem (3.6% of rows); the large one is the **last prompt position** (16.7%, a single identical token). Proposal 1 below should focus on capping the last position.
 - **Metric consequence:** a verbalizer that always quotes the newline would be right on 17% to 19% of rows, so overall marked-token quote accuracy is inflated. `eval` now prints the non-last-position numbers separately; read quote accuracy there.
-- The mix is dominated by two unlike sources, and templated GSM-Symbolic variants are likely the bulk of the near-duplicates; whether they leak into the in-distribution eval is measured by `data_report --splits-dir splits/` (**TODO: record the leakage numbers**).
+- The mix is dominated by two unlike sources, and templated GSM-Symbolic variants are likely the bulk of the near-duplicates; whether they leak into the in-distribution eval is measured by `data_report --splits-dir splits/` (measured below).
+
+- **Leakage measured:** 46 of 520 `eval_iid` prompts (8.8%) have a near-duplicate in the training buckets (`av_sft`/`ar_sft`/`rl`); 0 of 250 `eval_ood` prompts. This can only inflate in-distribution scores, so it does not explain the weak v1 results. `data_report --splits-dir splits/ --write-clean-eval eval_iid.parquet eval_iid_clean.parquet` writes an eval file without the leaked prompts (no retraining needed); use it for any reported in-distribution number.
 
 Indirect evidence already in hand: in the [token probe](/observations/token-probe.md) the single most common marked token was 28.5% of rows, which suggests that template tokens and last-position rows are a large share of v1.
 

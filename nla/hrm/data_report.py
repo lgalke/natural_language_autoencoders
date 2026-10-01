@@ -23,6 +23,9 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--base", required=True)
     p.add_argument("--max-rows", type=int, default=200000)
+    p.add_argument("--write-clean-eval", nargs=2, metavar=("BUILT_EVAL_PARQUET", "OUT_PARQUET"), default=None,
+                   help="needs --splits-dir: write BUILT_EVAL_PARQUET (e.g. eval_iid.parquet) without the prompts that have a "
+                        "near-duplicate in the training buckets, plus its sidecar (use the output as an eval set)")
     p.add_argument("--splits-dir", default=None,
                    help="directory with av_sft/ar_sft/rl/eval_iid/eval_ood .parquet from split.py: also reports how many "
                         "eval prompts have a near-duplicate in the training buckets (optimistic in-distribution eval)")
@@ -89,10 +92,30 @@ def main() -> None:
         for name in ("av_sft", "ar_sft", "rl"):
             train_keys |= set(keys(name).values())
         print("\nnear-duplicate leakage into eval (prompt key also present in av_sft/ar_sft/rl):")
+        leaked_docs: set[str] = set()
         for name in ("eval_iid", "eval_ood"):
             k = keys(name)
             leak = sum(v in train_keys for v in k.values())
+            if name == "eval_iid":
+                leaked_docs = {d for d, v in k.items() if v in train_keys}
             print(f"  {name}: {leak}/{len(k)} prompts ({leak / max(len(k), 1):.1%})")
+
+        if args.write_clean_eval:
+            import pyarrow as pa
+            from dataclasses import replace
+
+            from nla.datagen.storage import LocalStorage
+            from nla.hrm.sidecar import read_sidecar, write_sidecar
+            src, dst = args.write_clean_eval
+            table = pq.read_table(src)
+            keep = pa.array([d not in leaked_docs for d in table.column("doc_id").to_pylist()], type=pa.bool_())
+            clean = table.filter(keep)
+            pq.write_table(clean, dst)
+            meta = read_sidecar(LocalStorage(), src)
+            write_sidecar(LocalStorage(), dst, replace(meta, dataset_id=f"{meta.dataset_id}__clean", row_count=clean.num_rows,
+                                                         parent_datasets=[meta.dataset_id], created_at="", git_commit=""))
+            print(f"\nwrote {dst}: {clean.num_rows}/{table.num_rows} rows (removed {table.num_rows - clean.num_rows} rows of "
+                  f"{len(leaked_docs)} leaked prompts)")
 
 
 if __name__ == "__main__":

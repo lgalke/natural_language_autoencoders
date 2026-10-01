@@ -20,6 +20,8 @@ Does the verbalizer use the vector at all, or does the positive training FVE com
 
 # Missing measurements
 
+0. In-distribution eval prompts with near-duplicates in training: 8.8% (v1). Report iid numbers on `eval_iid_clean.parquet` (see [data collection v2](/plans/data-collection-v2.md)).
+
 1. FVE per term (sum, L, H) of the final RL checkpoint and of the post-SFT checkpoints on `eval_iid` and `eval_ood`. The RL run did not log it; run `nla.hrm.eval` with `--norm-stats-json` on both.
 2. Patch-back judge KL with mean-ablation references, for both the sum patch and the z_H-only patch (`eval --run-judge`).
 3. The text-only context baseline (`train_context_baseline.py`): the bar the explanations must beat.
