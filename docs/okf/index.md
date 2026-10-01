@@ -22,6 +22,7 @@ okf_version: "0.1"
 # Observations
 * [Cancellation of L and H](/observations/cancellation.md) - cos about -0.8 on a small sample
 * [RL run 1](/observations/rl-run-1.md) - what the 200-step log does and does not show
+* [RL run 2 (log-reward)](/observations/rl-run-2-log-reward.md) - FVE positive, KL large, samples look unfaithful (preliminary)
 * [Engineering pitfalls](/observations/pitfalls.md) - failures, causes and fixes
 
 # Status

@@ -1,3 +1,7 @@
+## 2026-10-02
+* **Run**: RL run 2 (700 steps, log-reward, batch 128 rollouts) finished; see [RL run 2](/observations/rl-run-2-log-reward.md). Held-out evaluation pending.
+* **Code**: judge OOM fix (LM head only at needed positions, chunked), `eval` geometry diagnostics, `--shuffle-vectors` control, marked-token quote accuracy; see [pitfalls](/observations/pitfalls.md).
+
 ## 2026-09-30
 * **Fixed**: `split.py` now writes the `judge_subset` sidecar; generated marker cache untracked; `eval --limit N` added; `preflight.py`, `AGENTS.md` and `opencode.json` added for handover to an opencode session on the cluster.
 * **Added**: this bundle (decisions, observations, open questions, methods notes).

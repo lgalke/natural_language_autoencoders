@@ -23,6 +23,7 @@ produced) so doing both in one process avoids a JSON round-trip.
 
 import argparse
 import json
+import re
 from pathlib import Path
 
 import pyarrow.parquet as pq
@@ -104,7 +105,8 @@ def _dump_samples(path: str, split: str, results: list[dict], weights: ReconWeig
                    "is_last_prompt_pos": row.get("is_last_prompt_pos"),
                    "context_marked": row.get("context_marked"), "completion": r["text"],
                    "L_field": r["parsed"][0] if r["parsed"] else None,
-                   "H_field": r["parsed"][1] if r["parsed"] else None}
+                   "H_field": r["parsed"][1] if r["parsed"] else None,
+                   "marked_token_quote_correct": quote_match(r["parsed"], row.get("context_marked"))}
             if r["parsed"] is not None:
                 z_L = torch.tensor(row["z_L"]).unsqueeze(0)
                 z_H = torch.tensor(row["z_H"]).unsqueeze(0)
@@ -113,6 +115,28 @@ def _dump_samples(path: str, split: str, results: list[dict], weights: ReconWeig
                 if mean_mse:
                     rec["fve"] = {k: v for k, v in loss.fve(mean_mse["sum"], mean_mse["L"], mean_mse["H"]).items()}
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+
+_QUOTE_RE = re.compile(r"""marked token\s*[:\-]?\s*[“"'`‘]([^”"'`’]{1,40})[”"'`’]""", re.I)
+
+
+def marked_token(context_marked: str | None) -> str | None:
+    m = re.search(r"⟦(.*?)⟧", context_marked or "", re.S)
+    return m.group(1) if m else None
+
+
+def quote_match(fields: tuple[str, str] | None, context_marked: str | None) -> bool | None:
+    """Text-level faithfulness check: SFT explanations tend to open with `The marked token "X" ...`.
+    True/False = the first quoted marked token equals / differs from the real ⟦marked⟧ token (case and
+    surrounding whitespace ignored); None = no quoted marked token (or no marker) in either field."""
+    tok = marked_token(context_marked)
+    if tok is None or fields is None:
+        return None
+    for f in fields:
+        m = _QUOTE_RE.search(f)
+        if m:
+            return m.group(1).strip().lower() == tok.strip().lower()
+    return None
 
 
 def _jaccard(a: str, b: str) -> float:
@@ -131,6 +155,8 @@ def summarize(results: list[dict], weights: ReconWeights, mean_mse: dict | None)
     overlaps, len_l, len_h = [], [], []
     cancel_hat, cos_hat = [], []
     geo = {"cos_s": [], "cos_L": [], "cos_H": [], "norm_ratio_s": []}
+    quote = [quote_match(r["parsed"], r["row"].get("context_marked")) for r in ok]
+    quoted = [q for q in quote if q is not None]
     for r in ok:
         z_L = torch.tensor(r["row"]["z_L"], dtype=torch.float32).unsqueeze(0)
         z_H = torch.tensor(r["row"]["z_H"], dtype=torch.float32).unsqueeze(0)
@@ -162,6 +188,8 @@ def summarize(results: list[dict], weights: ReconWeights, mean_mse: dict | None)
         "fve_sum_mean": _mean(fve["sum"]), "fve_L_mean": _mean(fve["L"]), "fve_H_mean": _mean(fve["H"]),
         "lh_jaccard_mean": _mean(overlaps),  # near 1.0 = fields are near-duplicates (no differentiation)
         "l_field_words_mean": _mean(len_l), "h_field_words_mean": _mean(len_h),
+        "quote_rate": len(quoted) / len(ok) if ok else float("nan"),  # share of explanations that quote a marked token
+        "quote_match_rate": _mean([float(q) for q in quoted]),        # of those, share quoting the REAL token
         **{f"geo_{k}_mean": _mean(v) for k, v in geo.items()},  # cosine to gold / norm ratio of the sum
         "cancellation_hat_mean": _mean(cancel_hat), "cos_LH_hat_mean": _mean(cos_hat),
     }
@@ -250,7 +278,9 @@ def main() -> None:
               f"fve_sum={summary['fve_sum_mean']:.3f} fve_L={summary['fve_L_mean']:.3f} "
               f"fve_H={summary['fve_H_mean']:.3f} lh_jaccard={summary['lh_jaccard_mean']:.3f}\n"
               f"      geometry vs gold: cos(sum)={summary['geo_cos_s_mean']:.3f} cos(L)={summary['geo_cos_L_mean']:.3f} "
-              f"cos(H)={summary['geo_cos_H_mean']:.3f} |sum_hat|/|sum|={summary['geo_norm_ratio_s_mean']:.2f}")
+              f"cos(H)={summary['geo_cos_H_mean']:.3f} |sum_hat|/|sum|={summary['geo_norm_ratio_s_mean']:.2f}\n"
+              f"      marked-token quote: quoted in {summary['quote_rate']:.0%} of explanations, "
+              f"correct token in {summary['quote_match_rate']:.0%} of those")
 
     if args.run_judge:
         from nla.hrm.judge import run_judge

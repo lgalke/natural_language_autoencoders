@@ -10,6 +10,10 @@ timestamp: 2026-09-30
 
 Do the L and H fields of the AV's explanations carry stream-specific content, and does RL produce it? Nothing in hand answers this yet.
 
+# Most urgent (as of RL run 2)
+
+Does the verbalizer use the vector at all, or does the positive training FVE come from text style? Needs: shuffled-vector control, held-out FVE with judge baselines, marked-token quote accuracy, held-out samples, the text-only baseline; see [RL run 2](/observations/rl-run-2-log-reward.md).
+
 # Missing measurements
 
 1. FVE per term (sum, L, H) of the final RL checkpoint and of the post-SFT checkpoints on `eval_iid` and `eval_ood`. The RL run did not log it; run `nla.hrm.eval` with `--norm-stats-json` on both.
