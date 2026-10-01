@@ -132,10 +132,11 @@ def quote_match(fields: tuple[str, str] | None, context_marked: str | None) -> b
     tok = marked_token(context_marked)
     if tok is None or fields is None:
         return None
+    want = (tok.strip() or json.dumps(tok)[1:-1]).lower()  # whitespace-only tokens are shown JSON-escaped (build.py)
     for f in fields:
         m = _QUOTE_RE.search(f)
         if m:
-            return m.group(1).strip().lower() == tok.strip().lower()
+            return m.group(1).strip().lower() == want
     return None
 
 

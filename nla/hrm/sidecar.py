@@ -67,6 +67,7 @@ class HrmDatasetMeta:
     prompt_templates: dict[str, str] = field(default_factory=dict)  # {"actor":..., "critic":...}
     norm_stats_path: str | None = None
     norm_stats_hash: str | None = None
+    build_options: dict[str, object] | None = None  # e.g. {'prefix_token': True} (build.py)
     api_summary: dict[str, object] | None = None  # model/max_tokens/temperature/instruction, from explain.py
     keep_debug_metadata: bool = True
     parent_datasets: list[str] = field(default_factory=list)

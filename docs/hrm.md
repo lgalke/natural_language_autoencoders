@@ -339,6 +339,20 @@ takes much longer. Train with `--target-format-rate 2 --epochs 3 --save-every 20
 `python -m nla.hrm.nll_check --parquet splits/ar_sft_explained.parquet --sidecar-from av_sft.parquet --av-ckpt ckpt/av_sft`
 (NLL with the real vector must be clearly below NLL with a shuffled one).
 
+**8b. Optional: SFT with a supervised token target.** `build.py --prefix-token` (no LLM calls) prepends
+`Marked token: "X".` to every L/H field; this teaches reading the token, which is ~99% linearly decodable from the
+vectors (`python -m nla.hrm.probe_check --base base.parquet`). Rebuild both SFT sets, retrain both SFT stages,
+and verify with `nll_check --prefix-token` and `eval` (the quote-accuracy line):
+```bash
+python -m nla.hrm.build --input splits/ar_sft_explained.parquet --stage ar_sft --prefix-token --output ar_sft_tok.parquet
+python -m nla.hrm.build --input splits/av_sft_explained.parquet --stage av_sft --prefix-token --output av_sft_tok.parquet
+python -m nla.hrm.train_ar_sft --train-parquet ar_sft_tok.parquet --epochs 3 --output ckpt/ar_sft_tok
+python -m nla.hrm.train_av_sft --train-parquet av_sft_tok.parquet --norm-stats-json norm_stats.json \
+    --target-format-rate 2 --epochs 3 --eval-every 500 --save-every 500 --output ckpt/av_sft_tok
+python -m nla.hrm.nll_check --parquet splits/ar_sft_explained.parquet --sidecar-from av_sft_tok.parquet \
+    --prefix-token --av-ckpt ckpt/av_sft_tok --limit 300
+```
+
 **9. RL** (where L/H differentiation can actually emerge). `--sanity` runs once
 before training: real vs. shuffled vectors should score differently (equal scores
 with many malformed completions are not necessarily a bug, see the `malformed=`

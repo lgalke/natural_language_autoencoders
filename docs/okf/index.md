@@ -16,6 +16,7 @@ okf_version: "0.1"
 * [SFT is format-only](/decisions/sft-is-format-only.md) - why no stream-specific teacher exists
 * [RL design](/decisions/rl-design.md) - GRPO-style loop, online AR, KL to post-SFT
 * [Judge design](/decisions/judge-design.md) - patch-back KL, eval-only
+* [Token-prefix targets](/decisions/token-prefix-targets.md) - optional supervised token target in the SFT data
 * [Corpus and splits](/decisions/corpus-and-splits.md) - sources, positions, OOD holdout
 * [Explanation teacher](/decisions/explanation-teacher.md) - GLM-5.3 via an OpenAI-compatible provider
 
@@ -23,6 +24,7 @@ okf_version: "0.1"
 * [Cancellation of L and H](/observations/cancellation.md) - cos about -0.8 on a small sample
 * [RL run 1](/observations/rl-run-1.md) - what the 200-step log does and does not show
 * [RL run 2 (log-reward)](/observations/rl-run-2-log-reward.md) - FVE positive, KL large, samples look unfaithful (preliminary)
+* [Token probe](/observations/token-probe.md) - marked token is 99% linearly decodable from z_H, 81% from z_L
 * [Engineering pitfalls](/observations/pitfalls.md) - failures, causes and fixes
 
 # Status

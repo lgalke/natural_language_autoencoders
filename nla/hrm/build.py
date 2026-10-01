@@ -77,6 +77,19 @@ _PROVENANCE_FIELDS = [
 ]
 
 
+def token_prefix(context_marked: str | None) -> str:
+    """`Marked token: "X". ` built from the ⟦marked⟧ token in the stored context (no LLM call). Whitespace-only
+    tokens are shown JSON-escaped (e.g. "\\n"). The wording matches eval.py's quote-accuracy regex."""
+    import json
+    import re
+    m = re.search(r"⟦(.*?)⟧", context_marked or "", re.S)
+    if m is None:
+        return ""
+    tok = m.group(1)
+    shown = tok.strip() or json.dumps(tok)[1:-1]
+    return f'Marked token: "{shown}". '
+
+
 def wrap_lh_explanation(l_text: str, h_text: str) -> str:
     return f"<explanation>\nL: {l_text}\nH: {h_text}\n</explanation>"
 
@@ -114,6 +127,10 @@ def main() -> None:
     p.add_argument("--verbalizer-model", default=DEFAULT_VERBALIZER)
     p.add_argument("--actor-template", default=DEFAULT_ACTOR_TEMPLATE)
     p.add_argument("--critic-template", default=DEFAULT_CRITIC_TEMPLATE)
+    p.add_argument("--prefix-token", action="store_true",
+                    help="av_sft/ar_sft only: prepend 'Marked token: \"X\".' (from the stored context) to every L/H field. "
+                         "The token is linearly decodable from the vectors (probe_check), so this is a strongly supervised, "
+                         "learnable target, and eval's quote accuracy then measures whether the AV reads it. No LLM calls.")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--keep-debug-metadata", action=argparse.BooleanOptionalAction, default=True)
     add_storage_args(p)
@@ -122,6 +139,7 @@ def main() -> None:
     assert "{inj_L}" in args.actor_template and "{inj_H}" in args.actor_template, (
         "--actor-template must contain both {inj_L} and {inj_H}"
     )
+    assert not args.prefix_token or args.stage in ("av_sft", "ar_sft"), "--prefix-token only applies to av_sft/ar_sft"
     if args.stage == "ar_sft":
         assert "{explanation}" in args.critic_template, "--critic-template must contain {explanation}"
 
@@ -164,6 +182,10 @@ def main() -> None:
             if args.stage == "av_sft":
                 e0 = batch.column("api_explanation_0").to_pylist()
                 e1 = batch.column("api_explanation_1").to_pylist()
+                if args.prefix_token:
+                    assert "context_marked" in batch.schema.names, "--prefix-token needs the context_marked column"
+                    pre = [token_prefix(c) for c in batch.column("context_marked").to_pylist()]
+                    e0, e1 = [a + b for a, b in zip(pre, e0, strict=True)], [a + b for a, b in zip(pre, e1, strict=True)]
                 responses = []
                 for i in range(n):
                     rng = random.Random(hashlib.sha256(f"{args.seed}|{doc_ids[i]}|av".encode()).digest())
@@ -186,6 +208,10 @@ def main() -> None:
             elif args.stage == "ar_sft":
                 e0 = batch.column("api_explanation_0").to_pylist()
                 e1 = batch.column("api_explanation_1").to_pylist()
+                if args.prefix_token:
+                    assert "context_marked" in batch.schema.names, "--prefix-token needs the context_marked column"
+                    pre = [token_prefix(c) for c in batch.column("context_marked").to_pylist()]
+                    e0, e1 = [a + b for a, b in zip(pre, e0, strict=True)], [a + b for a, b in zip(pre, e1, strict=True)]
                 zL_list = batch.column("z_L").to_pylist()
                 zH_list = batch.column("z_H").to_pylist()
                 for head_name, expls, targets in (("L", e0, zL_list), ("H", e1, zH_list)):
@@ -255,6 +281,7 @@ def main() -> None:
         created_at="",
         git_commit="",
         api_summary=None,
+        build_options={"prefix_token": True} if args.prefix_token else None,
     )
     write_sidecar(storage, args.output, out_meta)
     print(f"wrote {row_count} rows ({args.stage}) → {args.output}")

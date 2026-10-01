@@ -25,3 +25,13 @@ def test_quote_match_true_false_none():
 def test_quote_match_curly_quotes_case_and_second_field():
     fields = ("no quote here", "Marked token: “Day” completes the phrase")
     assert quote_match(fields, CTX) is True
+
+
+def test_token_prefix_roundtrips_through_quote_match():
+    from nla.hrm.build import token_prefix
+
+    for ctx in (CTX, "<bos>text⟦\n⟧more", "<bos>x⟦ the⟧y"):
+        pre = token_prefix(ctx)
+        assert pre.startswith('Marked token: "')
+        assert quote_match((pre + "rest of the explanation", "H"), ctx) is True
+    assert token_prefix("no marker") == ""

@@ -21,7 +21,7 @@ import pyarrow.parquet as pq
 import torch
 
 from nla.datagen.storage import LocalStorage
-from nla.hrm.build import _INJECT_H_PLACEHOLDER, _INJECT_L_PLACEHOLDER, wrap_lh_explanation
+from nla.hrm.build import _INJECT_H_PLACEHOLDER, _INJECT_L_PLACEHOLDER, token_prefix, wrap_lh_explanation
 from nla.hrm.devices import default_device, default_dtype
 from nla.hrm.model import (
     DEFAULT_VERBALIZER, InjectionAdapter, ReconHeads, build_inputs_embeds, load_extra_modules,
@@ -62,6 +62,9 @@ def main() -> None:
     p.add_argument("--av-ckpt", required=True, help="dir containing av/ and extra_modules.safetensors "
                                                     "(ckpt/av_sft, or ckpt/rl_logr/final)")
     p.add_argument("--verbalizer-model", default=DEFAULT_VERBALIZER)
+    p.add_argument("--prefix-token", action="store_true",
+                    help="score against targets with the 'Marked token: \"X\".' prefix (use for AV checkpoints trained "
+                         "from data built with build.py --prefix-token; needs the context_marked column)")
     p.add_argument("--limit", type=int, default=300)
     p.add_argument("--batch-size", type=int, default=8)
     p.add_argument("--device", default=default_device())
@@ -83,12 +86,15 @@ def main() -> None:
     load_extra_modules(f"{args.av_ckpt}/extra_modules.safetensors", inj_L, inj_H, ReconHeads(_D_MIMIR, d_verb))
     model.eval()
 
-    t = pq.read_table(args.parquet, columns=["z_L", "z_H", "api_explanation_0", "api_explanation_1"])
+    cols = ["z_L", "z_H", "api_explanation_0", "api_explanation_1"] + (["context_marked"] if args.prefix_token else [])
+    t = pq.read_table(args.parquet, columns=cols)
     rows = t.to_pylist()[: args.limit]
     assert len(rows) >= 2, "need at least 2 rows for the shuffled condition"
     examples = [
         _build_example(tok, {"prompt": [{"content": actor_content}],
-                             "response": wrap_lh_explanation(r["api_explanation_0"], r["api_explanation_1"]),
+                             "response": wrap_lh_explanation(
+                                 (token_prefix(r["context_marked"]) if args.prefix_token else "") + r["api_explanation_0"],
+                                 (token_prefix(r["context_marked"]) if args.prefix_token else "") + r["api_explanation_1"]),
                              "z_L": r["z_L"], "z_H": r["z_H"]}, tm.injection_char_L, tm.injection_char_H)
         for r in rows
     ]
