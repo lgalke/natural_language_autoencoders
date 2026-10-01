@@ -23,6 +23,19 @@ Fresh start from the SFT checkpoints, `--log-reward` (reward = -log loss), 16 ro
 
 For a prompt that is a math word problem (marked token " day"), both sampled explanations at step 660 describe a children's story, quote different invented marked tokens ("wiggled", "fell"), and mention characters not in the prompt. The text is fluent and in the style of the SFT explanations, but not faithful to this row. Possible reading: the reconstructor receives only the text, so style-level shortcuts can yield FVE above 0 without the explanation describing the particular vector. This is a hypothesis, not a finding; two samples of one row are not evidence about the distribution.
 
+# Held-out evaluation of `ckpt/rl_logr/final` (n = 50 per split, greedy; shuffled control not yet run)
+
+| split | fve sum / L / H | cos to gold L / H / sum | quoted marked token correct | judge sum-patch KL (noise floor) | fraction of KL recovered, sum / z_H-only |
+|---|---|---|---|---|---|
+| iid | 0.03 / 0.03 / 0.05 | 0.96 / 0.98 / 0.73 | 0% of the 70% that quote one | 6.11 (0.002) | -1.50 / 0.09 |
+| ood (MuSR) | -0.17 / -0.23 / 0.04 | 0.95 / 0.98 / 0.67 | 0% of the 72% that quote one | 6.75 (0.002) | -0.13 / -4.20 |
+
+Field overlap (lh_jaccard) 0.13 to 0.14. Reading: the training-rollout FVE of about 0.2 did not transfer to held-out prompts; explanations never quote the real marked token, so they are not reading it from the vector; reconstructions are no better than the mean vector under the judge. High cosines to gold reflect the large component shared by all vectors, not information; FVE against the mean predictor is the informative number.
+
+# Leading explanation (hypothesis)
+
+AV-SFT stopped as soon as the greedy format rate reached 0.99, which probably left the verbalizer never having learned to read the vector, so RL had nothing vector-dependent to amplify; see the correction in [SFT decision](/decisions/sft-is-format-only.md). Test: `nla.hrm.nll_check` on `ckpt/av_sft`.
+
 # Checks queued to settle it
 
 1. Shuffled-vector control (`eval --shuffle-vectors`): FVE with another row's vector injected. Equal FVE would mean the verbalizer ignores the vector.

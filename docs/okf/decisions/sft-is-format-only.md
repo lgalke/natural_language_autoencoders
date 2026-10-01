@@ -19,6 +19,10 @@ No teacher can see z_L or z_H, so no teacher can write stream-specific targets. 
 
 Any difference between the L and H fields after SFT would be an artefact of the random assignment, not evidence about the streams. Keeping SFT stream-neutral means any stream-specific content that appears later must come from the RL reward, which is the only stage where the reconstructor scores against the real z_L versus z_H.
 
+# Correction (2026-10-02): SFT is NOT only format learning
+
+The explanations carry no stream information, but they do describe the specific token and context, so the SFT cross-entropy is also what teaches the verbalizer to read the injected vector (the format is learned in a few dozen steps; reading takes far longer). The AV-SFT script's early stop at "greedy format rate >= 0.99" very likely ended training long before the vector was read: later held-out evaluation showed explanations unrelated to the vector (marked-token quote accuracy 0%, FVE about 0; see [RL run 2](/observations/rl-run-2-log-reward.md)). Hypothesis, to be confirmed with `nla.hrm.nll_check` (teacher-forced NLL with real versus shuffled vectors). `--target-format-rate 2` disables the early stop.
+
 # Consequences
 
 - Do not read stream differences off SFT checkpoints.

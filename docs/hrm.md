@@ -334,6 +334,10 @@ python -m nla.hrm.train_av_sft --train-parquet av_sft.parquet \
     --norm-stats-json norm_stats.json --output ckpt/av_sft
 ```
 Check the AV-SFT `[eval] format_rate` line reached the target before moving on.
+**Do not stop AV-SFT at the format target.** Format is learned in dozens of steps, but *reading the vector*
+takes much longer. Train with `--target-format-rate 2 --epochs 3 --save-every 200` and verify with
+`python -m nla.hrm.nll_check --parquet splits/ar_sft_explained.parquet --sidecar-from av_sft.parquet --av-ckpt ckpt/av_sft`
+(NLL with the real vector must be clearly below NLL with a shuffled one).
 
 **9. RL** (where L/H differentiation can actually emerge). `--sanity` runs once
 before training: real vs. shuffled vectors should score differently (equal scores

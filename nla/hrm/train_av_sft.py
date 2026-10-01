@@ -88,7 +88,13 @@ def main() -> None:
                     help="defaults to norm_stats.json's injection_scale_p75, or 5.0 if unset")
     p.add_argument("--norm-stats-json", default=None)
     p.add_argument("--eval-every", type=int, default=50)
-    p.add_argument("--target-format-rate", type=float, default=0.99)
+    p.add_argument("--target-format-rate", type=float, default=0.99,
+                    help="stop early once the greedy format rate on eval reaches this. NOTE: the format is learned in a few "
+                         "dozen steps, but READING the injected vector (what makes explanations faithful) takes far longer; "
+                         "pass a value >1 (e.g. 2) to disable early stopping and train for --epochs, and check progress with "
+                         "`python -m nla.hrm.nll_check`")
+    p.add_argument("--save-every", type=int, default=0,
+                    help="also save the adapter to <output>/step_N every N steps (0 = only at the end)")
     p.add_argument("--max-steps", type=int, default=None, help="hard cap in addition to --epochs")
     p.add_argument("--log-every", type=int, default=20)
     p.add_argument("--output", required=True)
@@ -151,6 +157,13 @@ def main() -> None:
             step += 1
             if step % args.log_every == 0:
                 print(f"  step={step} loss={loss.item():.4f}")
+            if args.save_every and step % args.save_every == 0:
+                from pathlib import Path as _P
+                _P(f"{args.output}/step_{step}").mkdir(parents=True, exist_ok=True)
+                model.save_pretrained(f"{args.output}/step_{step}", selected_adapters=["av"])
+                from nla.hrm.model import ReconHeads as _RH
+                save_extra_modules(f"{args.output}/step_{step}/extra_modules.safetensors", inj_L, inj_H,
+                                   _RH(_D_MIMIR, model.config.hidden_size))
             if step % args.eval_every == 0 or (args.max_steps and step >= args.max_steps):
                 n_ok = 0
                 for r in eval_rows:
