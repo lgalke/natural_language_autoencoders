@@ -85,6 +85,7 @@ with MSE the mean over the d coordinates, w_sum = 1.0, w_comp = 0.25. The sum te
 - Reward scale: the malformed-completion penalty is much larger than typical reconstruction differences ([RL run 1](/observations/rl-run-1.md)); conclusions about what RL learned require the FVE evaluation.
 - One seed, one checkpoint of the target, one 200-step run so far; no variance estimates. **TODO.**
 - PrefixLM makes activations at a position depend on later tokens, so they are not next-token predictors in the usual sense; explanations describe the state in the context of the whole prompt.
+- The data collection is ad hoc (uniform position sampling that includes the shared chat-template tail, prompt positions only, no response positions, uncontrolled source mix; see [data collection v2](/plans/data-collection-v2.md)); statements about L/H dynamics during generation are out of scope for v1 data.
 - The corpus is a public stand-in for the intended reasoning mixture; MuSR as out-of-distribution set is a strong shift (long narratives).
 - Open items are tracked in [open questions](/open-questions.md).
 

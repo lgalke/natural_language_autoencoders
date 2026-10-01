@@ -1,4 +1,5 @@
 ## 2026-10-02
+* **Planned**: [data collection v2](/plans/data-collection-v2.md); **Code**: `nla.hrm.data_report` for the composition of an extraction.
 * **Measured**: token probe ceiling, shuffled-vector control and NLL gap; **Code**: `probe_check`, `nll_check`, `build --prefix-token`; see [token probe](/observations/token-probe.md), [token-prefix targets](/decisions/token-prefix-targets.md).
 * **Run**: RL run 2 (700 steps, log-reward, batch 128 rollouts) finished; see [RL run 2](/observations/rl-run-2-log-reward.md). Held-out evaluation pending.
 * **Code**: judge OOM fix (LM head only at needed positions, chunked), `eval` geometry diagnostics, `--shuffle-vectors` control, marked-token quote accuracy; see [pitfalls](/observations/pitfalls.md).

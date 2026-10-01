@@ -20,6 +20,9 @@ okf_version: "0.1"
 * [Corpus and splits](/decisions/corpus-and-splits.md) - sources, positions, OOD holdout
 * [Explanation teacher](/decisions/explanation-teacher.md) - GLM-5.3 via an OpenAI-compatible provider
 
+# Plans
+* [Data collection v2](/plans/data-collection-v2.md) - proposed changes to extraction, sampling and mix (not implemented)
+
 # Observations
 * [Cancellation of L and H](/observations/cancellation.md) - cos about -0.8 on a small sample
 * [RL run 1](/observations/rl-run-1.md) - what the 200-step log does and does not show

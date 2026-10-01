@@ -36,6 +36,8 @@ Does the verbalizer use the vector at all, or does the positive training FVE com
 
 # Decisions that may need revisiting
 
+- The v1 data collection (ad-hoc corpus, uniform positions including the chat-template tail, prompt-only): see [data collection v2](/plans/data-collection-v2.md). Run `nla.hrm.data_report` and record the numbers there.
+
 - Reward scale: the failure penalty dominates; candidates are `--log-reward`, a milder failure reward, or a larger `w_sum`.
 - Number of RL steps and group size: 200 steps of 64 rollouts is small.
 - Whether the injection scale used the verbalizer p75 statistic or the 5.0 fallback is not recorded.
