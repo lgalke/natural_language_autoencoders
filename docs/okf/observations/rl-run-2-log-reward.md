@@ -36,6 +36,12 @@ Field overlap (lh_jaccard) 0.13 to 0.14. Reading: the training-rollout FVE of ab
 
 AV-SFT stopped as soon as the greedy format rate reached 0.99, which probably left the verbalizer never having learned to read the vector, so RL had nothing vector-dependent to amplify; see the correction in [SFT decision](/decisions/sft-is-format-only.md). Test: `nla.hrm.nll_check` on `ckpt/av_sft`.
 
+# Shuffled-vector control and teacher-forced NLL (held-out rows, n = 50 / 300)
+
+- Shuffled control (`eval --shuffle-vectors`, another row's vector injected, scored against the original gold): FVE sum / L / H drops from 0.03 / 0.03 / 0.05 to -0.23 / -0.16 / -0.30 on iid and from -0.17 / -0.23 / 0.04 to -0.31 / -0.33 / -0.17 on ood. Worse in all 6 comparisons, so the explanations do depend on the vector, but with the real vector FVE is still only about 0. Quote rates were identical in both runs (70% / 72% quoted, 0% correct).
+- `nll_check` (mean NLL per token of the teacher explanation, AR-SFT-bucket rows the AV never trained on, 300 rows): `ckpt/av_sft` real 2.0985, shuffled 2.1122, gap +0.0136; `ckpt/rl_logr/final` real 2.5316, shuffled 2.5668, gap +0.0352. SFT taught the verbalizer to read the vector only slightly (0.6% of the NLL); RL increased the dependence about 2.6x while moving away from the teacher's wording (higher overall NLL).
+- Reading: the verbalizer reads a small coarse signal (not token identity); the explanation text carries a modest amount of information relative to its large vector-independent part (wording, narrative details). A threshold of 0.01 nats/token printed by the script is an arbitrary rule of thumb, not a calibrated criterion.
+
 # Checks queued to settle it
 
 1. Shuffled-vector control (`eval --shuffle-vectors`): FVE with another row's vector injected. Equal FVE would mean the verbalizer ignores the vector.

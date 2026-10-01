@@ -12,6 +12,8 @@ Do the L and H fields of the AV's explanations carry stream-specific content, an
 
 # Most urgent (as of RL run 2)
 
+Update 2026-10-02: the SFT-length hypothesis is only partly supported (NLL gap after SFT is small but positive, +0.0136 nats/token; RL raised it to +0.0352; shuffled-vector FVE is lower than real-vector FVE, so the vector is used a little). Next diagnostic: `nla.hrm.probe_check` (linear-probe ceiling for reading the marked token from z_L/z_H), which decides whether "quote the marked token" is a learnable target.
+
 Hypothesis to test first: the AV never learned to read the vector because AV-SFT stopped at the format target. Run `nla.hrm.nll_check` on `ckpt/av_sft` (gap between NLL with a shuffled and the real vector; about 0 means ignored). If so: retrain AV-SFT without early stopping (`--target-format-rate 2 --epochs N --save-every`), track the NLL gap, then redo RL.
 
 Does the verbalizer use the vector at all, or does the positive training FVE come from text style? Needs: shuffled-vector control, held-out FVE with judge baselines, marked-token quote accuracy, held-out samples, the text-only baseline; see [RL run 2](/observations/rl-run-2-log-reward.md).
