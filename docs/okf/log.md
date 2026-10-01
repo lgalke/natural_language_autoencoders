@@ -1,4 +1,5 @@
 ## 2026-10-02
+* **Added**: [experiment log](/experiments.md) (E1 to E5: SFT v1, RL run 1, RL run 2, token-prefix SFT, RL run 3 pending).
 * **Planned**: [data collection v2](/plans/data-collection-v2.md); **Code**: `nla.hrm.data_report` for the composition of an extraction.
 * **Measured**: token probe ceiling, shuffled-vector control and NLL gap; **Code**: `probe_check`, `nll_check`, `build --prefix-token`; see [token probe](/observations/token-probe.md), [token-prefix targets](/decisions/token-prefix-targets.md).
 * **Run**: RL run 2 (700 steps, log-reward, batch 128 rollouts) finished; see [RL run 2](/observations/rl-run-2-log-reward.md). Held-out evaluation pending.

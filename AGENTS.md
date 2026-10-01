@@ -76,6 +76,8 @@ Untested code: `nla/hrm/train_context_baseline.py`, `nla/hrm/eval_cross.py` (nev
 
 ## Record what you learn
 
+First, **`docs/okf/experiments.md` is the experiment log**: read it to see every run, its exact command and numbers, and add a new entry (append-only, with n and CHECK/TODO marks) for every training run or evaluation you do. Update the summary table too.
+
 After each meaningful result or decision, update `docs/okf/` (OKF v0.1: every concept file needs frontmatter with a
 `type`; index.md lists entries; log.md has dated entries; absolute links like `/decisions/x.md`):
 - results and surprises: a file in `docs/okf/observations/`; link it from `index.md` and add a line to `log.md`;

@@ -30,6 +30,9 @@ okf_version: "0.1"
 * [Token probe](/observations/token-probe.md) - marked token is 99% linearly decodable from z_H, 81% from z_L
 * [Engineering pitfalls](/observations/pitfalls.md) - failures, causes and fixes
 
+# Experiments
+* [Experiment log](/experiments.md) - every training run and evaluation with commands, numbers (with n) and status
+
 # Status
 * [Open questions](/open-questions.md) - missing measurements and untested code
 
