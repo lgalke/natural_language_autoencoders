@@ -253,7 +253,7 @@ python -m nla.hrm.train_rl --rl-parquet rl.parquet --av-sft-ckpt ckpt/av_sft --a
     --sanity --output ckpt/rl
 
 python -m nla.hrm.judge --eval-parquet eval_ood.parquet --reconstructions recon.json --output judge.json
-python -m nla.hrm.eval --eval-parquet iid=eval_iid.parquet ood=eval_ood.parquet --av-ckpt ckpt/rl/final --ar-ckpt ckpt/rl/final \
+python -m nla.hrm.eval --eval-parquet iid=eval_iid_clean.parquet ood=eval_ood.parquet --av-ckpt ckpt/rl/final --ar-ckpt ckpt/rl/final \
     --run-judge --output eval_report.json
 ```
 
@@ -326,6 +326,16 @@ for s in rl eval_iid eval_ood judge_subset; do
 done
 ```
 
+**7b. Check the data and make a clean in-distribution eval set.** The split is per prompt, so near-duplicate
+prompts (e.g. templated GSM-Symbolic variants) can land in both training and `eval_iid`, which inflates in-distribution
+scores (8.8% of v1's `eval_iid` prompts). This prints the corpus composition (datasets, last-position share, token
+concentration, duplicates, leakage) and writes `eval_iid_clean.parquet` without the leaked prompts; use it for every
+reported in-distribution number. No retraining needed. (`eval_ood` is a whole held-out dataset and needs no cleaning.)
+```bash
+python -m nla.hrm.data_report --base base.parquet --splits-dir splits/ \
+    --write-clean-eval eval_iid.parquet eval_iid_clean.parquet
+```
+
 **8. SFT warm-ups** (format only: they teach the `L:/H:` format, not L-vs-H content).
 AV-SFT stops early once `--target-format-rate` (0.99) is reached on eval.
 ```bash
@@ -370,7 +380,7 @@ lower `--batch-size`/`--group-size`. `configs/hrm/rl.sh` wraps these with the sa
 **10. Evaluate** (report + Mimir patch-back judge; loads Mimir, so run it on the GPU).
 Pass the same checkpoint dir for AV and AR when evaluating an RL checkpoint.
 ```bash
-python -m nla.hrm.eval --eval-parquet iid=eval_iid.parquet ood=eval_ood.parquet \
+python -m nla.hrm.eval --eval-parquet iid=eval_iid_clean.parquet ood=eval_ood.parquet \
     --av-ckpt ckpt/rl/final --ar-ckpt ckpt/rl/final \
     --norm-stats-json norm_stats.json --run-judge --mean-from rl.parquet --output eval_report.json
 ```
