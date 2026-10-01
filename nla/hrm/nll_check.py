@@ -33,25 +33,45 @@ from nla.hrm.train_av_sft import _build_example, _collate
 _D_MIMIR = 1536
 
 
+def _prefix_mask(tok, response: str, n_resp_ids: int) -> list[int]:
+    """1 for response tokens inside a `Marked token: "X".` span (character-offset overlap), else 0."""
+    import re
+    spans = [m.span() for m in re.finditer(r'Marked token: "[^"]*"\.', response)]
+    offs = tok(response, add_special_tokens=False, return_offsets_mapping=True)["offset_mapping"]
+    mask = [int(any(a < e and b > s0 for s0, e in spans)) for a, b in offs]
+    assert len(mask) == n_resp_ids
+    return mask
+
+
 @torch.no_grad()
-def mean_nll(model, examples, inj_L, inj_H, ids_meta, pad_id, device, z_override=None, batch_size=8) -> float:
-    """Mean per-token NLL of the response over all examples. z_override: (zL_list, zH_list) to inject instead."""
+def mean_nll(model, examples, inj_L, inj_H, ids_meta, pad_id, device, z_override=None, batch_size=8):
+    """(mean per-token NLL over all response tokens, mean NLL over the token-prefix span or nan).
+    z_override: (zL_list, zH_list) to inject instead of each row's own vectors."""
     model.set_adapter("av")
-    total, n_tok = 0.0, 0
+    total, n_tok, p_total, p_tok = 0.0, 0, 0.0, 0
     for start in range(0, len(examples), batch_size):
         batch = examples[start : start + batch_size]
         input_ids, labels, attn, z_L, z_H = _collate(batch, pad_id, device)
         if z_override is not None:
             z_L = torch.tensor(z_override[0][start : start + batch_size], dtype=torch.float32, device=device)
             z_H = torch.tensor(z_override[1][start : start + batch_size], dtype=torch.float32, device=device)
+        pmask = torch.zeros_like(labels)
+        for i, e in enumerate(batch):
+            pm = e.get("pmask")
+            if pm is not None:
+                n_prompt = sum(1 for x in e["labels"] if x == -100)
+                pmask[i, n_prompt : n_prompt + len(pm)] = torch.tensor(pm, device=device)
         embeds = build_inputs_embeds(model, input_ids, z_L, z_H, inj_L, inj_H, *ids_meta)
         logits = model(inputs_embeds=embeds, attention_mask=attn).logits[:, :-1].float()
-        tgt = labels[:, 1:]
+        tgt, pm_t = labels[:, 1:], pmask[:, 1:]
         nll = torch.nn.functional.cross_entropy(logits.reshape(-1, logits.size(-1)), tgt.reshape(-1),
-                                                ignore_index=-100, reduction="sum")
-        total += nll.item()
-        n_tok += (tgt != -100).sum().item()
-    return total / max(n_tok, 1)
+                                                ignore_index=-100, reduction="none").view_as(tgt)
+        valid = tgt != -100
+        total += nll[valid].sum().item()
+        n_tok += valid.sum().item()
+        p_total += nll[pm_t.bool() & valid].sum().item()
+        p_tok += (pm_t.bool() & valid).sum().item()
+    return total / max(n_tok, 1), (p_total / p_tok if p_tok else float("nan"))
 
 
 def main() -> None:
@@ -98,17 +118,25 @@ def main() -> None:
                              "z_L": r["z_L"], "z_H": r["z_H"]}, tm.injection_char_L, tm.injection_char_H)
         for r in rows
     ]
+    if args.prefix_token:
+        for e, r in zip(examples, rows, strict=True):
+            resp = wrap_lh_explanation(token_prefix(r["context_marked"]) + r["api_explanation_0"],
+                                       token_prefix(r["context_marked"]) + r["api_explanation_1"])
+            e["pmask"] = _prefix_mask(tok, resp, sum(1 for x in e["labels"] if x != -100) - 1)  # minus the EOS label
     rolled = (examples[1:] + examples[:1])
     shuf = ([e["z_L"] for e in rolled], [e["z_H"] for e in rolled])
 
-    real = mean_nll(model, examples, inj_L, inj_H, ids_meta, tok.pad_token_id, args.device, None, args.batch_size)
-    shuffled = mean_nll(model, examples, inj_L, inj_H, ids_meta, tok.pad_token_id, args.device, shuf, args.batch_size)
+    real, real_p = mean_nll(model, examples, inj_L, inj_H, ids_meta, tok.pad_token_id, args.device, None, args.batch_size)
+    shuffled, shuf_p = mean_nll(model, examples, inj_L, inj_H, ids_meta, tok.pad_token_id, args.device, shuf, args.batch_size)
     print(f"checkpoint {args.av_ckpt}  rows={len(rows)}")
     print(f"  NLL/token  real vector:     {real:.4f}")
     print(f"  NLL/token  shuffled vector: {shuffled:.4f}")
     print(f"  gap (shuffled - real):      {shuffled - real:+.4f}   "
           f"({'vector is used' if shuffled - real > 0.01 else 'vector looks IGNORED'}; 0.01 nats/token = rule of thumb)")
-
+    if args.prefix_token:
+        print(f"  marked-token span only:  NLL/token real {real_p:.4f}  shuffled {shuf_p:.4f}  gap {shuf_p - real_p:+.4f}")
+        print("    (the span is ~6 tokens per explanation, so it is diluted in the all-token numbers above; "
+              "a verbalizer that reads the token shows a large gap HERE)")
 
 if __name__ == "__main__":
     main()
