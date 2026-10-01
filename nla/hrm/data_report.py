@@ -23,6 +23,9 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--base", required=True)
     p.add_argument("--max-rows", type=int, default=200000)
+    p.add_argument("--splits-dir", default=None,
+                   help="directory with av_sft/ar_sft/rl/eval_iid/eval_ood .parquet from split.py: also reports how many "
+                        "eval prompts have a near-duplicate in the training buckets (optimistic in-distribution eval)")
     args = p.parse_args()
 
     t = pq.read_table(args.base, columns=["dataset", "doc_id", "position", "prompt_len", "is_last_prompt_pos",
@@ -75,6 +78,21 @@ def main() -> None:
     print(f"near-duplicate prompts (same first 200 chars, digits collapsed): {dup_prompts}/{n_prompts} "
           f"({dup_prompts / n_prompts:.1%}) in {sum(len(v) > 1 for v in seen.values())} groups")
     print("\n(near-duplicates in different split buckets make the in-distribution eval optimistic)")
+
+    if args.splits_dir:
+        def keys(name: str) -> dict[str, str]:
+            path = f"{args.splits_dir.rstrip('/')}/{name}.parquet"
+            tt = pq.read_table(path, columns=["doc_id", "context_marked"])
+            return {d: _norm(re.sub(r"⟦|⟧", "", c))[:200] for d, c in zip(tt.column("doc_id").to_pylist(),
+                                                                       tt.column("context_marked").to_pylist(), strict=True)}
+        train_keys: set[str] = set()
+        for name in ("av_sft", "ar_sft", "rl"):
+            train_keys |= set(keys(name).values())
+        print("\nnear-duplicate leakage into eval (prompt key also present in av_sft/ar_sft/rl):")
+        for name in ("eval_iid", "eval_ood"):
+            k = keys(name)
+            leak = sum(v in train_keys for v in k.values())
+            print(f"  {name}: {leak}/{len(k)} prompts ({leak / max(len(k), 1):.1%})")
 
 
 if __name__ == "__main__":

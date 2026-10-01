@@ -12,13 +12,37 @@ Proposal only. The v1 data (see [corpus and splits](/decisions/corpus-and-splits
 
 # Measure first
 
-`python -m nla.hrm.data_report --base base.parquet` (CPU, seconds) reports rows and prompts per dataset, prompt lengths, the share of last-position rows, the share of rows that sit inside the shared chat-template tail, how concentrated the marked tokens are, the position distribution within prompts, and near-duplicate prompts. **TODO: record the numbers for the v1 data here** and use them to decide which items matter.
+`python -m nla.hrm.data_report --base base.parquet` (CPU, seconds) reports rows and prompts per dataset, prompt lengths, the share of last-position rows, the share of rows that sit inside the shared chat-template tail, how concentrated the marked tokens are, the position distribution within prompts, and near-duplicate prompts. 
+
+## v1 numbers (`data_report` on the real `base.parquet`)
+
+32592 rows from 5432 prompts (6 rows per prompt: 5 sampled + the last position).
+
+| dataset | rows | share | prompts | mean / max length (tokens) |
+|---|---|---|---|---|
+| gsm-symbolic | 12000 | 36.8% | 2000 | 72 / 159 |
+| simplestories | 12000 | 36.8% | 2000 | 291 / 728 |
+| da_instruct (DynaWord) | 5970 | 18.3% | 995 | 375 / 2044 |
+| musr (held-out OOD) | 1500 | 4.6% | 250 | 1175 / 1526 |
+| bbh | 1122 | 3.4% | 187 | 236 / 574 |
+
+- Last-prompt-position rows: 16.7% (exactly one of six per prompt), all the same marked token (id 107, the newline). The shared chat-template tail is 5 tokens; rows inside it are 20.3% in total, so only 3.6% beyond the last position.
+- 4756 distinct marked tokens; the top-8 cover 34.5% of rows (id 107 alone 18.8%, then punctuation and function-word ids at 1% to 4%).
+- Position within the prompt, quintiles: 15%, 17%, 17%, 17%, 33% (the last quintile includes the tail).
+- Near-duplicate prompts (same first 200 characters with digits collapsed): 742 of 5432 (13.7%) in 270 groups.
+- Two sources (GSM-Symbolic, SimpleStories) are 74% of the rows; the reasoning sources BBH and MuSR together are 8%. DynaWord kept 995 of 2000 prompts because the 2048-token length filter drops about half of its long documents (so it is biased towards short documents).
+
+## What the numbers change
+
+- The template tail beyond the last position is a small problem (3.6% of rows); the large one is the **last prompt position** (16.7%, a single identical token). Proposal 1 below should focus on capping the last position.
+- **Metric consequence:** a verbalizer that always quotes the newline would be right on 17% to 19% of rows, so overall marked-token quote accuracy is inflated. `eval` now prints the non-last-position numbers separately; read quote accuracy there.
+- The mix is dominated by two unlike sources, and templated GSM-Symbolic variants are likely the bulk of the near-duplicates; whether they leak into the in-distribution eval is measured by `data_report --splits-dir splits/` (**TODO: record the leakage numbers**).
 
 Indirect evidence already in hand: in the [token probe](/observations/token-probe.md) the single most common marked token was 28.5% of rows, which suggests that template tokens and last-position rows are a large share of v1.
 
 # Proposals, ranked by expected value for the research question
 
-1. **Stop sampling the chat-template tail; cap the last position.**
+1. **Cap the last position (and drop the rest of the template tail from random sampling).**
    - Every prompt ends with the same few template tokens (`<turn|>`, newline, `<|turn>`, `model`, newline; 5 tokens in the smoke measurement). The sampler draws uniformly from token index 3 up to the end, so it can land there, and for short prompts that is a large fraction of the rows (50% on the toy prompts).
    - Rows on these tokens say almost nothing about the particular prompt and inflate the share of one identical marked token, which also makes "marked token" targets and quote accuracy easier to game.
    - Change: exclude the common tail from random sampling in `stage0_hrm.py`; keep the last prompt position as a separate, capped number of rows per prompt (the "about to answer" state is scientifically interesting; it just should not be 15% to 50% of the data).

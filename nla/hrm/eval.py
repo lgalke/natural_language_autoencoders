@@ -275,6 +275,11 @@ def main() -> None:
             "last_prompt_pos": summarize(last, weights, mean_mse) if last else None,
             "other_positions": summarize(other, weights, mean_mse) if other else None,
         }
+        if other:
+            o = report["splits"][name]["other_positions"]
+            print(f"      non-last positions only (n={o['n']}): fve_sum={o['fve_sum_mean']:.3f} fve_L={o['fve_L_mean']:.3f} "
+                  f"fve_H={o['fve_H_mean']:.3f}; quoted {o['quote_rate']:.0%}, correct {o['quote_match_rate']:.0%}  "
+                  f"(the last prompt position is always the same newline token, so read quote accuracy HERE)")
         print(f"[{name}] n={summary['n']} format_rate={summary['format_rate']:.2%} "
               f"fve_sum={summary['fve_sum_mean']:.3f} fve_L={summary['fve_L_mean']:.3f} "
               f"fve_H={summary['fve_H_mean']:.3f} lh_jaccard={summary['lh_jaccard_mean']:.3f}\n"
