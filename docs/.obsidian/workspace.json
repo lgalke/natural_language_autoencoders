@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "okf/experiments.md",
+                "file": "okf/observations/rl-run-1.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "experiments"
+              "title": "rl-run-1"
             }
           }
         ]
@@ -99,7 +99,7 @@
             "state": {
               "type": "backlink",
               "state": {
-                "file": "okf/experiments.md",
+                "file": "okf/observations/rl-run-1.md",
                 "collapseAll": false,
                 "extraContext": false,
                 "sortOrder": "alphabetical",
@@ -118,7 +118,7 @@
             "state": {
               "type": "outgoing-link",
               "state": {
-                "file": "okf/experiments.md",
+                "file": "okf/observations/rl-run-1.md",
                 "linksCollapsed": false,
                 "unlinkedCollapsed": true
               },
@@ -161,7 +161,7 @@
             "state": {
               "type": "outline",
               "state": {
-                "file": "okf/experiments.md",
+                "file": "okf/observations/rl-run-1.md",
                 "followCursor": false,
                 "showSearch": false,
                 "searchQuery": ""
@@ -190,15 +190,29 @@
   },
   "active": "4ddf24d6245496cd",
   "lastOpenFiles": [
-    "design.md",
-    "hrm.md",
-    "inference.md",
-    "setup.md",
-    "okf/observations/rl-run-1.md",
     "okf/observations/pitfalls.md",
     "okf/observations/cancellation.md",
-    "okf/plans/data-collection-v2.md",
+    "okf/decisions/verbalizer-model.md",
+    "okf/decisions/two-injection-markers.md",
+    "okf/decisions/token-prefix-targets.md",
+    "okf/decisions/shared-scalar-normalization.md",
+    "okf/decisions/sft-is-format-only.md",
+    "okf/decisions/rl-design.md",
+    "okf/decisions/prefixlm-rendering.md",
+    "okf/decisions/own-trainer-not-miles.md",
+    "okf/decisions/loss-and-reward.md",
+    "okf/decisions/judge-design.md",
+    "okf/decisions/hook-site.md",
+    "okf/decisions/explanation-teacher.md",
+    "okf/decisions/corpus-and-splits.md",
+    "setup.md",
+    "hrm.md",
+    "inference.md",
+    "design.md",
+    "okf/open-questions.md",
     "okf/experiments.md",
+    "okf/observations/rl-run-1.md",
+    "okf/plans/data-collection-v2.md",
     "okf/log.md",
     "okf/paper/methods-notes.md",
     "okf/index.md"

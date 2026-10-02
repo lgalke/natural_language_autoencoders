@@ -22,7 +22,7 @@ timestamp: 2026-10-02
 | E2 | RL run 1 (`ckpt/rl`) | about 0 to -0.3 (n=10) | 0% (0 of 70% quoted) | iid -3.0 / -0.1, ood -0.3 / -1.0 (n=10) | not measured | done |
 | E3 | RL run 2, log-reward (`ckpt/rl_logr`) | iid 0.03 / 0.03 / 0.05; ood -0.17 / -0.23 / 0.04 (n=50) | 0% | iid -1.5 / 0.09, ood -0.1 / -4.2 (n=50) | +0.0352 | done |
 | E4 | SFT v2, token prefix (`ckpt/av_sft_tok`, `ckpt/ar_sft_tok`) | iid -2.9 / -2.8 / -8.0; ood -2.5 / -3.1 / -7.5 (n=100) | iid 22% (n=87); ood 9% (n=88) | not run | +0.0273 | done |
-| E5 | RL run 3 on E4 (`ckpt/rl_tok`) | TODO | TODO | TODO | TODO | launched, results pending |
+| E5 | RL run 3 on E4 (`ckpt/rl_tok`) | iid 0.23 / 0.21 / 0.25; ood 0.03 / -0.02 / 0.19 (n=100); non-last: iid 0.15 / 0.14 / 0.15, ood -0.07 / -0.12 / 0.10 | iid 19% (n=87); ood 8% (n=88) | not run | not measured | done; baselines and shuffle control pending |
 
 Reference points: chance for always guessing a frequent non-last token is about 5%; a linear probe reads the marked token with 99% accuracy from z_H (see [token probe](/observations/token-probe.md)). FVE after SFT only is strongly negative because the reconstructor's scale is uncalibrated; online AR training in RL repairs it within about 25 steps.
 
@@ -67,4 +67,13 @@ Reference points: chance for always guessing a frequent non-last token is about 
 - **Command:** `python -u -m nla.hrm.train_rl --rl-parquet rl.parquet --eval-parquet eval_iid_clean.parquet --av-sft-ckpt ckpt/av_sft_tok --ar-sft-ckpt ckpt/ar_sft_tok --log-reward --batch-size 16 --group-size 8 --policy-lr 1e-5 --kl-beta 0.05 --max-new-tokens 400 --steps 650 --save-every 50 --eval-every 50 --output ckpt/rl_tok`. Expected 6.5 to 7.5 h (about 35 to 42 s/step, unmeasured). CHECK: confirm the command actually used.
 - **Watch rules:** abort if malformed stays above about 30/128 for several prints, or KL above 0.3 early; FVE should recover towards 0 within about 25 steps.
 - **Planned evaluation:** `eval` on `ckpt/rl_tok/final` with `--max-new-tokens 400`, `--limit 100`, clean iid and ood, plus `--shuffle-vectors` as the control, `--run-judge --mean-from rl.parquet`; compare quote accuracy on non-last positions (E4 baseline: 22% iid / 9% ood) and FVE.
-- **Results:** TODO.
+- **Training log (first step):** 41.7 s/step (ETA 7.5 h), malformed 25/128, `fve_sum` -3.5 / -3.1 / -8.4 at step 1 (mid-run and final values: TODO from `rl_tok.log`).
+- **Held-out eval (`eval --limit 100 --max-new-tokens 400`, `ckpt/rl_tok/final`, clean iid and ood):**
+  - format rate 99% iid / 100% ood (the truncation fix worked);
+  - FVE sum / L / H: iid 0.228 / 0.205 / 0.245, ood 0.029 / -0.022 / 0.189; non-last positions only: iid 0.153 / 0.137 / 0.154 (n=87), ood -0.070 / -0.124 / 0.098 (n=88);
+  - geometry: cos to gold sum 0.79 iid / 0.74 ood, L 0.965 / 0.955, H 0.987 / 0.986; `|sum_hat|/|sum|` 0.82; `lh_jaccard` 0.18;
+  - marked-token quote (non-last): correct 19% iid, 8% ood (E4 SFT-only baseline 22% / 9%: RL did not improve token reading); all positions: 30% iid / 19% ood of the 99% to 100% that quote one;
+  - grounding in the prompt text (new metric, approximate): 11% of 535 (iid) and 16% of 505 (ood) quoted spans occur verbatim in the context; 3% of 238 (iid) and 6% of 212 (ood) capitalised names occur in the context.
+- **Samples (5 non-last rows):** coarse properties right (fiction versus question, Nordic language), details invented (stock names such as Leo, Lily, Anne, Starfall; a tourism article read as a question about photographing mosques); wrong tokens are close to the true ones in kind (`.` read as `,` or `:`, ` desire` read as `hope`), so the verbalizer may read the token class and not its identity (five anecdotes only).
+- **Conclusion:** first positive held-out FVE, mostly in-distribution; token reading unchanged by RL; explanations confabulate specifics. Open: how much of the FVE is explained by knowing only the dataset or the true token (`nla.hrm.baselines`), and whether it depends on the vector (shuffled control, ideally shuffling within a dataset).
+- **Next:** (1) `baselines --limit 100` on the same rows; (2) `eval --shuffle-vectors` on `rl_tok/final`; (3) judge with `--mean-from rl.parquet`; (4) consider structured, shorter targets restricted to vector-determined facets ([v2 plan](/plans/data-collection-v2.md)).

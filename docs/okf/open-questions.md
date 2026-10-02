@@ -10,7 +10,11 @@ timestamp: 2026-09-30
 
 Do the L and H fields of the AV's explanations carry stream-specific content, and does RL produce it? Nothing in hand answers this yet.
 
-# Most urgent (as of RL run 2)
+# Most urgent (as of RL run 3, E5)
+
+First positive held-out FVE (iid 0.23), but explanations confabulate details (3% to 11% grounding) and RL did not improve token reading (19% iid). Is the FVE more than a dataset-level or token-class effect? Run `nla.hrm.baselines` (per-dataset and per-true-token mean predictors on the same eval rows) and a within-dataset shuffled-vector control; see [experiments](/experiments.md) E5.
+
+# Earlier (as of RL run 2)
 
 Update 2026-10-02: the SFT-length hypothesis is only partly supported (NLL gap after SFT is small but positive, +0.0136 nats/token; RL raised it to +0.0352; shuffled-vector FVE is lower than real-vector FVE, so the vector is used a little). Next diagnostic: `nla.hrm.probe_check` (linear-probe ceiling for reading the marked token from z_L/z_H), which decides whether "quote the marked token" is a learnable target.
 
