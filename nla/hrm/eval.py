@@ -106,7 +106,8 @@ def _dump_samples(path: str, split: str, results: list[dict], weights: ReconWeig
                    "context_marked": row.get("context_marked"), "completion": r["text"],
                    "L_field": r["parsed"][0] if r["parsed"] else None,
                    "H_field": r["parsed"][1] if r["parsed"] else None,
-                   "marked_token_quote_correct": quote_match(r["parsed"], row.get("context_marked"))}
+                   "marked_token_quote_correct": quote_match(r["parsed"], row.get("context_marked")),
+                   "grounding": grounding(r["parsed"], row.get("context_marked"))}
             if r["parsed"] is not None:
                 z_L = torch.tensor(row["z_L"]).unsqueeze(0)
                 z_H = torch.tensor(row["z_H"]).unsqueeze(0)
@@ -140,6 +141,38 @@ def quote_match(fields: tuple[str, str] | None, context_marked: str | None) -> b
     return None
 
 
+_GENERIC_CAPS = {"marked", "the", "key", "narrative", "story", "state", "task", "feature", "children", "danish", "english",
+                 "question", "answer", "yes", "no", "token", "context", "position", "marked", "this", "that", "these", "both"}
+_QUOTED_RE = re.compile(r"""[“"]([^”"\n]{3,80})[”"]""")
+
+
+def _context_text(context_marked: str | None) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"⟦|⟧", "", context_marked or "")).lower()
+
+
+def grounding(fields: tuple[str, str] | None, context_marked: str | None) -> dict | None:
+    """Text-level hallucination check against the prompt: (a) quoted spans of an explanation that occur VERBATIM in the
+    context (the marked-token quote is excluded), (b) capitalised words not at a sentence start (names like 'Leo') that
+    occur in the context. Both are lower bounds on confabulation: a name can be correct without being in the text, and
+    generic capitalised words ('Danish') are filtered by a short stoplist. Returns None without fields/context."""
+    if fields is None or not context_marked:
+        return None
+    ctx = _context_text(context_marked)
+    quoted_total = quoted_ok = caps_total = caps_ok = 0
+    for f in fields:
+        body = re.sub(r'^\s*Marked token: "[^"]*"\.\s*', "", f)
+        for q in _QUOTED_RE.findall(body):
+            quoted_total += 1
+            quoted_ok += re.sub(r"\s+", " ", q).strip().lower() in ctx
+        for m in re.finditer(r"(?<=[a-z,;:] )([A-Z][a-zæøå]{2,})\b", body):
+            w = m.group(1)
+            if w.lower() in _GENERIC_CAPS:
+                continue
+            caps_total += 1
+            caps_ok += w.lower() in ctx
+    return {"quoted_total": quoted_total, "quoted_ok": quoted_ok, "caps_total": caps_total, "caps_ok": caps_ok}
+
+
 def _jaccard(a: str, b: str) -> float:
     ta, tb = set(a.lower().split()), set(b.lower().split())
     if not ta or not tb:
@@ -158,6 +191,9 @@ def summarize(results: list[dict], weights: ReconWeights, mean_mse: dict | None)
     geo = {"cos_s": [], "cos_L": [], "cos_H": [], "norm_ratio_s": []}
     quote = [quote_match(r["parsed"], r["row"].get("context_marked")) for r in ok]
     quoted = [q for q in quote if q is not None]
+    gr = [g for g in (grounding(r["parsed"], r["row"].get("context_marked")) for r in ok) if g is not None]
+    q_tot, q_ok = sum(g["quoted_total"] for g in gr), sum(g["quoted_ok"] for g in gr)
+    c_tot, c_ok = sum(g["caps_total"] for g in gr), sum(g["caps_ok"] for g in gr)
     for r in ok:
         z_L = torch.tensor(r["row"]["z_L"], dtype=torch.float32).unsqueeze(0)
         z_H = torch.tensor(r["row"]["z_H"], dtype=torch.float32).unsqueeze(0)
@@ -191,6 +227,10 @@ def summarize(results: list[dict], weights: ReconWeights, mean_mse: dict | None)
         "l_field_words_mean": _mean(len_l), "h_field_words_mean": _mean(len_h),
         "quote_rate": len(quoted) / len(ok) if ok else float("nan"),  # share of explanations that quote a marked token
         "quote_match_rate": _mean([float(q) for q in quoted]),        # of those, share quoting the REAL token
+        "grounded_quote_rate": q_ok / q_tot if q_tot else float("nan"),   # quoted spans found verbatim in the prompt
+        "grounded_quote_spans": q_tot,
+        "grounded_name_rate": c_ok / c_tot if c_tot else float("nan"),    # capitalised names found in the prompt
+        "grounded_name_words": c_tot,
         **{f"geo_{k}_mean": _mean(v) for k, v in geo.items()},  # cosine to gold / norm ratio of the sum
         "cancellation_hat_mean": _mean(cancel_hat), "cos_LH_hat_mean": _mean(cos_hat),
     }
@@ -286,7 +326,10 @@ def main() -> None:
               f"      geometry vs gold: cos(sum)={summary['geo_cos_s_mean']:.3f} cos(L)={summary['geo_cos_L_mean']:.3f} "
               f"cos(H)={summary['geo_cos_H_mean']:.3f} |sum_hat|/|sum|={summary['geo_norm_ratio_s_mean']:.2f}\n"
               f"      marked-token quote: quoted in {summary['quote_rate']:.0%} of explanations, "
-              f"correct token in {summary['quote_match_rate']:.0%} of those")
+              f"correct token in {summary['quote_match_rate']:.0%} of those\n"
+              f"      grounding in the prompt text: {summary['grounded_quote_rate']:.0%} of {summary['grounded_quote_spans']} quoted spans "
+              f"verbatim in context; {summary['grounded_name_rate']:.0%} of {summary['grounded_name_words']} capitalised names in context "
+              f"(low = confabulated details)")
 
     if args.run_judge:
         from nla.hrm.judge import run_judge

@@ -35,3 +35,16 @@ def test_token_prefix_roundtrips_through_quote_match():
         assert pre.startswith('Marked token: "')
         assert quote_match((pre + "rest of the explanation", "H"), ctx) is True
     assert token_prefix("no marker") == ""
+
+
+def test_grounding_detects_confabulated_quotes_and_names():
+    from nla.hrm.eval import grounding
+
+    ctx = "<bos><|turn>user\nMia stepped forward and the pirate fell into the water, sinking⟦ deeper⟧.<turn|>"
+    good = ('Marked token: "deeper". The text says "the pirate fell into the water" and Mia reacts.', "H")
+    bad = ('Marked token: "deeper". It quotes "Suddenly, a voice" and Leo finds the ghost in Starfall.', "H")
+    g, b = grounding(good, ctx), grounding(bad, ctx)
+    assert g["quoted_total"] == 1 and g["quoted_ok"] == 1
+    assert b["quoted_total"] == 1 and b["quoted_ok"] == 0
+    assert b["caps_total"] >= 2 and b["caps_ok"] == 0
+    assert grounding(None, ctx) is None and grounding(good, None) is None
