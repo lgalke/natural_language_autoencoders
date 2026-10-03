@@ -139,6 +139,19 @@ def marked_token(context_marked: str | None) -> str | None:
     return m.group(1) if m else None
 
 
+def quote_match_fields(fields: tuple[str, str] | None, context_marked: str | None) -> tuple[bool | None, bool | None]:
+    """Per-field version of `quote_match`: (L_result, H_result), each True/False/None (field has no quoted token)."""
+    tok = marked_token(context_marked)
+    if tok is None or fields is None:
+        return None, None
+    want = (tok.strip() or json.dumps(tok)[1:-1]).lower()
+    out = []
+    for f in fields:
+        m = _QUOTE_RE.search(f)
+        out.append(m.group(1).strip().lower() == want if m else None)
+    return out[0], out[1]
+
+
 def quote_match(fields: tuple[str, str] | None, context_marked: str | None) -> bool | None:
     """Text-level faithfulness check: SFT explanations tend to open with `The marked token "X" ...`.
     True/False = the first quoted marked token equals / differs from the real ⟦marked⟧ token (case and
@@ -204,6 +217,9 @@ def summarize(results: list[dict], weights: ReconWeights, mean_mse: dict | None)
     geo = {"cos_s": [], "cos_L": [], "cos_H": [], "norm_ratio_s": []}
     quote = [quote_match(r["parsed"], r["row"].get("context_marked")) for r in ok]
     quoted = [q for q in quote if q is not None]
+    per_field = [quote_match_fields(r["parsed"], r["row"].get("context_marked")) for r in ok]
+    qL = [float(a) for a, _ in per_field if a is not None]
+    qH = [float(b) for _, b in per_field if b is not None]
     gr = [g for g in (grounding(r["parsed"], r["row"].get("context_marked")) for r in ok) if g is not None]
     q_tot, q_ok = sum(g["quoted_total"] for g in gr), sum(g["quoted_ok"] for g in gr)
     c_tot, c_ok = sum(g["caps_total"] for g in gr), sum(g["caps_ok"] for g in gr)
@@ -240,6 +256,8 @@ def summarize(results: list[dict], weights: ReconWeights, mean_mse: dict | None)
         "l_field_words_mean": _mean(len_l), "h_field_words_mean": _mean(len_h),
         "quote_rate": len(quoted) / len(ok) if ok else float("nan"),  # share of explanations that quote a marked token
         "quote_match_rate": _mean([float(q) for q in quoted]),        # of those, share quoting the REAL token
+        "quote_match_rate_L": _mean(qL), "quote_match_rate_H": _mean(qH),  # per field, over fields that quote a token
+        "quote_rate_L": len(qL) / len(ok) if ok else float("nan"), "quote_rate_H": len(qH) / len(ok) if ok else float("nan"),
         "grounded_quote_rate": q_ok / q_tot if q_tot else float("nan"),   # quoted spans found verbatim in the prompt
         "grounded_quote_spans": q_tot,
         "grounded_name_rate": c_ok / c_tot if c_tot else float("nan"),    # capitalised names found in the prompt
@@ -343,6 +361,8 @@ def main() -> None:
               f"cos(H)={summary['geo_cos_H_mean']:.3f} |sum_hat|/|sum|={summary['geo_norm_ratio_s_mean']:.2f}\n"
               f"      marked-token quote: quoted in {summary['quote_rate']:.0%} of explanations, "
               f"correct token in {summary['quote_match_rate']:.0%} of those\n"
+              f"      per field: L correct {summary['quote_match_rate_L']:.0%} (quoted {summary['quote_rate_L']:.0%}), "
+              f"H correct {summary['quote_match_rate_H']:.0%} (quoted {summary['quote_rate_H']:.0%})\n"
               f"      grounding in the prompt text: {summary['grounded_quote_rate']:.0%} of {summary['grounded_quote_spans']} quoted spans "
               f"verbatim in context; {summary['grounded_name_rate']:.0%} of {summary['grounded_name_words']} capitalised names in context "
               f"(low = confabulated details)")
