@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "okf/index.md",
+                "file": "okf/experiments.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "index"
+              "title": "experiments"
             }
           }
         ]
@@ -99,7 +99,7 @@
             "state": {
               "type": "backlink",
               "state": {
-                "file": "okf/index.md",
+                "file": "okf/experiments.md",
                 "collapseAll": false,
                 "extraContext": false,
                 "sortOrder": "alphabetical",
@@ -118,7 +118,7 @@
             "state": {
               "type": "outgoing-link",
               "state": {
-                "file": "okf/index.md",
+                "file": "okf/experiments.md",
                 "linksCollapsed": false,
                 "unlinkedCollapsed": true
               },
@@ -161,7 +161,7 @@
             "state": {
               "type": "outline",
               "state": {
-                "file": "okf/index.md",
+                "file": "okf/experiments.md",
                 "followCursor": false,
                 "showSearch": false,
                 "searchQuery": ""
@@ -190,6 +190,10 @@
   },
   "active": "4ddf24d6245496cd",
   "lastOpenFiles": [
+    "okf/plans/data-collection-v2.md",
+    "okf/paper/methods-notes.md",
+    "okf/observations/rl-run-2-log-reward.md",
+    "okf/index.md",
     "okf/open-questions.md",
     "okf/log.md",
     "okf/experiments.md",
@@ -211,10 +215,6 @@
     "okf/decisions/corpus-and-splits.md",
     "setup.md",
     "hrm.md",
-    "inference.md",
-    "design.md",
-    "okf/plans/data-collection-v2.md",
-    "okf/paper/methods-notes.md",
-    "okf/index.md"
+    "inference.md"
   ]
 }
