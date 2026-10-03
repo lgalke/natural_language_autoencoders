@@ -12,6 +12,8 @@ Do the L and H fields of the AV's explanations carry stream-specific content, an
 
 # Most urgent (as of RL run 3, E5)
 
+Update: the plain shuffled-vector control shows the E5 FVE gain and the token reading depend on the specific vector (FVE iid 0.23 to -0.25, correct tokens 19% to 2%); word pieces are read at 19% iid. Still open: within-dataset shuffle, judge patch-back KL with mean ablation for E5, the 3% to 16% grounding of details, and how to raise token reading (token-span loss weight, structured targets).
+
 First positive held-out FVE (iid 0.23), but explanations confabulate details (3% to 11% grounding) and RL did not improve token reading (19% iid). Is the FVE more than a dataset-level or token-class effect? Run `nla.hrm.baselines` (per-dataset and per-true-token mean predictors on the same eval rows) and a within-dataset shuffled-vector control; see [experiments](/experiments.md) E5.
 
 # Earlier (as of RL run 2)
