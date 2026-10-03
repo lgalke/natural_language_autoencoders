@@ -18,7 +18,7 @@ from tqdm import tqdm
 
 from nla.hrm.devices import default_device, default_dtype
 from nla.datagen.storage import LocalStorage
-from nla.hrm.build import _INJECT_H_PLACEHOLDER, _INJECT_L_PLACEHOLDER
+from nla.hrm.build import _INJECT_H_PLACEHOLDER, _INJECT_L_PLACEHOLDER, prefix_token_mask
 from nla.hrm.model import DEFAULT_VERBALIZER, InjectionAdapter, build_inputs_embeds, load_verbalizer, render_av_prompt, save_extra_modules
 from nla.hrm.sidecar import read_sidecar
 from nla.schema import extract_explanation
@@ -31,7 +31,7 @@ def _load_rows(parquet_path: str) -> list[dict]:
     return t.to_pylist()
 
 
-def _build_example(tokenizer, row: dict, inj_l_char: str, inj_h_char: str) -> dict:
+def _build_example(tokenizer, row: dict, inj_l_char: str, inj_h_char: str, with_pmask: bool = False) -> dict:
     content = row["prompt"][0]["content"].replace(_INJECT_L_PLACEHOLDER, inj_l_char).replace(_INJECT_H_PLACEHOLDER, inj_h_char)
     prompt_text = tokenizer.apply_chat_template(
         [{"role": "user", "content": content}], tokenize=False, add_generation_prompt=True
@@ -41,7 +41,22 @@ def _build_example(tokenizer, row: dict, inj_l_char: str, inj_h_char: str) -> di
     eos = tokenizer.eos_token_id
     input_ids = prompt_ids + response_ids + [eos]
     labels = [-100] * len(prompt_ids) + response_ids + [eos]
-    return {"input_ids": input_ids, "labels": labels, "z_L": row["z_L"], "z_H": row["z_H"]}
+    ex = {"input_ids": input_ids, "labels": labels, "z_L": row["z_L"], "z_H": row["z_H"]}
+    if with_pmask:
+        ex["pmask"] = prefix_token_mask(tokenizer, row["response"], len(response_ids))
+    return ex
+
+
+def _token_weights(batch: list[dict], labels: torch.Tensor, weight: float) -> torch.Tensor:
+    """Per-position loss weights aligned with `labels` (before the one-token shift): `weight` on tokens inside a
+    `Marked token: "X".` span, 1 elsewhere, 0 where labels are ignored."""
+    w = (labels != -100).float()
+    for i, e in enumerate(batch):
+        pm = e.get("pmask")
+        if pm is not None:
+            n_prompt = sum(1 for x in e["labels"] if x == -100)
+            w[i, n_prompt : n_prompt + len(pm)] += (weight - 1.0) * torch.tensor(pm, dtype=torch.float32, device=w.device)
+    return w
 
 
 def _collate(examples: list[dict], pad_id: int, device: str):
@@ -93,6 +108,10 @@ def main() -> None:
                          "dozen steps, but READING the injected vector (what makes explanations faithful) takes far longer; "
                          "pass a value >1 (e.g. 2) to disable early stopping and train for --epochs, and check progress with "
                          "`python -m nla.hrm.nll_check`")
+    p.add_argument("--prefix-weight", type=float, default=1.0,
+                    help="loss weight on the tokens of the `Marked token: \"X\".` span (data built with build.py "
+                         "--prefix-token). The span is ~6 of ~250 tokens, so at weight 1 it barely moves the loss; try 5 to 10 "
+                         "to push the verbalizer to read the token. 1.0 = unchanged behaviour")
     p.add_argument("--save-every", type=int, default=0,
                     help="also save the adapter to <output>/step_N every N steps (0 = only at the end)")
     p.add_argument("--max-steps", type=int, default=None, help="hard cap in addition to --epochs")
@@ -134,7 +153,7 @@ def main() -> None:
     train_rows = _load_rows(args.train_parquet)
     eval_rows = _load_rows(args.eval_parquet) if args.eval_parquet else train_rows[: min(16, len(train_rows))]
 
-    examples = [_build_example(tokenizer, r, inj_l_char, inj_h_char) for r in train_rows]
+    examples = [_build_example(tokenizer, r, inj_l_char, inj_h_char, with_pmask=args.prefix_weight != 1.0) for r in train_rows]
     step = 0
     model.train()
     stop = False
@@ -149,7 +168,13 @@ def main() -> None:
             out = model(inputs_embeds=embeds, attention_mask=attn)
             logits = out.logits[:, :-1].contiguous()
             shift_labels = labels[:, 1:].contiguous()
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)).float(), shift_labels.view(-1), ignore_index=-100)
+            if args.prefix_weight != 1.0:
+                ce = F.cross_entropy(logits.view(-1, logits.size(-1)).float(), shift_labels.view(-1),
+                                     ignore_index=-100, reduction="none").view_as(shift_labels)
+                w = _token_weights(batch, labels, args.prefix_weight)[:, 1:]
+                loss = (ce * w).sum() / w.sum().clamp_min(1.0)
+            else:
+                loss = F.cross_entropy(logits.view(-1, logits.size(-1)).float(), shift_labels.view(-1), ignore_index=-100)
 
             optim.zero_grad()
             loss.backward()

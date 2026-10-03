@@ -21,7 +21,7 @@ import pyarrow.parquet as pq
 import torch
 
 from nla.datagen.storage import LocalStorage
-from nla.hrm.build import _INJECT_H_PLACEHOLDER, _INJECT_L_PLACEHOLDER, token_prefix, wrap_lh_explanation
+from nla.hrm.build import _INJECT_H_PLACEHOLDER, _INJECT_L_PLACEHOLDER, prefix_token_mask, token_prefix, wrap_lh_explanation
 from nla.hrm.devices import default_device, default_dtype
 from nla.hrm.model import (
     DEFAULT_VERBALIZER, InjectionAdapter, ReconHeads, build_inputs_embeds, load_extra_modules,
@@ -31,16 +31,6 @@ from nla.hrm.sidecar import read_sidecar
 from nla.hrm.train_av_sft import _build_example, _collate
 
 _D_MIMIR = 1536
-
-
-def _prefix_mask(tok, response: str, n_resp_ids: int) -> list[int]:
-    """1 for response tokens inside a `Marked token: "X".` span (character-offset overlap), else 0."""
-    import re
-    spans = [m.span() for m in re.finditer(r'Marked token: "[^"]*"\.', response)]
-    offs = tok(response, add_special_tokens=False, return_offsets_mapping=True)["offset_mapping"]
-    mask = [int(any(a < e and b > s0 for s0, e in spans)) for a, b in offs]
-    assert len(mask) == n_resp_ids
-    return mask
 
 
 @torch.no_grad()
@@ -122,7 +112,7 @@ def main() -> None:
         for e, r in zip(examples, rows, strict=True):
             resp = wrap_lh_explanation(token_prefix(r["context_marked"]) + r["api_explanation_0"],
                                        token_prefix(r["context_marked"]) + r["api_explanation_1"])
-            e["pmask"] = _prefix_mask(tok, resp, sum(1 for x in e["labels"] if x != -100) - 1)  # minus the EOS label
+            e["pmask"] = prefix_token_mask(tok, resp, sum(1 for x in e["labels"] if x != -100) - 1)  # minus the EOS label
     rolled = (examples[1:] + examples[:1])
     shuf = ([e["z_L"] for e in rolled], [e["z_H"] for e in rolled])
 
