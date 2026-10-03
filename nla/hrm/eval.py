@@ -43,13 +43,26 @@ _D_MIMIR = 1536
 
 @torch.no_grad()
 def generate_and_reconstruct(model, tokenizer, rows, inj_l_char, inj_h_char, inj_L, inj_H, heads, ids_meta,
-                               critic_template, device, max_new_tokens=300, batch_size=16, shuffle_vectors=False):
+                               critic_template, device, max_new_tokens=300, batch_size=16, shuffle_vectors=False, within_dataset=False):
     from nla.hrm.model import build_inputs_embeds
 
     out = []
     # Control: inject the vectors of a DIFFERENT row (rolled by one) while still scoring against the
     # original row's gold vectors. If FVE does not drop, the verbalizer is ignoring the vector.
     inject_rows = rows[1:] + rows[:1] if shuffle_vectors else rows
+    if shuffle_vectors and within_dataset:
+        # roll within each dataset, so the injected vector still comes from the same SOURCE: removes the dataset-level
+        # information that a plain shuffle leaves intact. Datasets with a single row cannot be shuffled (kept as is).
+        groups: dict[str, list[int]] = {}
+        for i, r in enumerate(rows):
+            groups.setdefault(r.get("dataset"), []).append(i)
+        inject_rows = list(rows)
+        for idxs in groups.values():
+            for a, b in zip(idxs, idxs[1:] + idxs[:1], strict=True):
+                inject_rows[a] = rows[b]
+        n_same = sum(len(v) == 1 for v in groups.values())
+        if n_same:
+            print(f"  [shuffle] {n_same} dataset(s) with a single row were not shuffled")
     for start in tqdm(range(0, len(rows), batch_size), desc="rollout"):
         batch_rows = rows[start : start + batch_size]
         inj_rows = inject_rows[start : start + batch_size]
@@ -257,6 +270,9 @@ def main() -> None:
     p.add_argument("--shuffle-vectors", action="store_true",
                     help="CONTROL: inject another row's vectors (still score against the original gold). "
                          "Compare its FVE to the normal run: no drop = the verbalizer ignores the vector")
+    p.add_argument("--shuffle-within-dataset", action="store_true",
+                    help="with --shuffle-vectors: swap vectors only among rows of the SAME dataset (stronger control: "
+                         "removes the dataset-level information a plain shuffle keeps)")
     p.add_argument("--limit", type=int, default=None,
                     help="evaluate only a random sample of N rows per split (quick check; seeded, reproducible)")
     p.add_argument("--dump-samples", default=None,
@@ -293,7 +309,7 @@ def main() -> None:
         assert tm is not None
         ids_meta = (tm.injection_token_id_L, tm.injection_left_neighbor_id_L, tm.injection_right_neighbor_id_L,
                     tm.injection_token_id_H, tm.injection_left_neighbor_id_H, tm.injection_right_neighbor_id_H)
-        gen_path = f"{args.output}.gen_{name}{'_shuf' if args.shuffle_vectors else ''}.pt"
+        gen_path = f"{args.output}.gen_{name}{('_shufds' if args.shuffle_within_dataset else '_shuf') if args.shuffle_vectors else ''}.pt"
         if args.reuse_generations and Path(gen_path).exists():
             saved = torch.load(gen_path)
             assert len(saved) == len(rows), f"{gen_path} has {len(saved)} rows, split now has {len(rows)}; drop --reuse-generations"
@@ -302,7 +318,7 @@ def main() -> None:
         else:
             results = generate_and_reconstruct(model, tokenizer, rows, tm.injection_char_L, tm.injection_char_H,
                                                  inj_L, inj_H, heads, ids_meta, meta.prompt_templates["critic"], args.device,
-                                                 args.max_new_tokens, args.batch_size, args.shuffle_vectors)
+                                                 args.max_new_tokens, args.batch_size, args.shuffle_vectors, args.shuffle_within_dataset)
             torch.save([{k: v for k, v in r.items() if k != "row"} for r in results], gen_path)
         all_results[name] = results
         if args.dump_samples:

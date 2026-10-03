@@ -76,4 +76,15 @@ Reference points: chance for always guessing a frequent non-last token is about 
   - grounding in the prompt text (new metric, approximate): 11% of 535 (iid) and 16% of 505 (ood) quoted spans occur verbatim in the context; 3% of 238 (iid) and 6% of 212 (ood) capitalised names occur in the context.
 - **Samples (5 non-last rows):** coarse properties right (fiction versus question, Nordic language), details invented (stock names such as Leo, Lily, Anne, Starfall; a tourism article read as a question about photographing mosques); wrong tokens are close to the true ones in kind (`.` read as `,` or `:`, ` desire` read as `hope`), so the verbalizer may read the token class and not its identity (five anecdotes only).
 - **Conclusion:** first positive held-out FVE, mostly in-distribution; token reading unchanged by RL; explanations confabulate specifics. Open: how much of the FVE is explained by knowing only the dataset or the true token (`nla.hrm.baselines`), and whether it depends on the vector (shuffled control, ideally shuffling within a dataset).
-- **Next:** (1) `baselines --limit 100` on the same rows; (2) `eval --shuffle-vectors` on `rl_tok/final`; (3) judge with `--mean-from rl.parquet`; (4) consider structured, shorter targets restricted to vector-determined facets ([v2 plan](/plans/data-collection-v2.md)).
+- **Group-mean baselines** (`nla.hrm.baselines --limit 100`, same 100 rows per split as the eval; FVE sum / L / H; train rows = base rows outside every eval file, 28248):
+
+| predictor | iid all rows | iid non-last (n=87) | ood all rows | ood non-last (n=88) |
+|---|---|---|---|---|
+| global mean | 0.046 / 0.015 / 0.087 | 0.002 / -0.015 / 0.015 | -0.057 / -0.124 / 0.103 | -0.118 / -0.184 / 0.040 |
+| per dataset | 0.084 / 0.060 / 0.106 | 0.036 / 0.023 / 0.035 | same as global (dataset unseen) | same as global |
+| per dataset x last-pos | 0.158 / 0.136 / 0.171 | 0.056 / 0.043 / 0.052 | same as global | same as global |
+| per TRUE marked token | 0.280 / 0.173 / 0.469 | 0.226 / 0.124 / 0.402 | 0.028 / -0.085 / 0.270 | -0.067 / -0.182 / 0.179 |
+| **E5** | 0.228 / 0.205 / 0.245 | 0.153 / 0.137 / 0.154 | 0.029 / -0.022 / 0.189 | -0.070 / -0.124 / 0.098 |
+
+  Reading (paired, same rows, n=100, no confidence intervals): E5 beats the per-dataset x last-position baseline by about 0.07 (all rows) and 0.10 (non-last) on every term, so the explanation carries information beyond source and position; roughly a third of the all-rows FVE is what that baseline already gets. Knowing the true token would give z_H an FVE of 0.40 to 0.47 against E5's 0.15 to 0.25 (z_L: E5 is at or above the true-token baseline), so token reading is where the headroom is, mainly for H. On ood E5's sum FVE equals the true-token baseline although it quotes the right token only 8% of the time (other coarse features carry the information).
+- **Next:** (1) done; (1b) within-dataset shuffled control: `eval --shuffle-vectors --shuffle-within-dataset`; (2) `eval --shuffle-vectors` on `rl_tok/final`; (3) judge with `--mean-from rl.parquet`; (4) consider structured, shorter targets restricted to vector-determined facets ([v2 plan](/plans/data-collection-v2.md)).
