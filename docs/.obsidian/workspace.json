@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "okf/observations/rl-run-1.md",
+                "file": "okf/index.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "rl-run-1"
+              "title": "index"
             }
           }
         ]
@@ -99,7 +99,7 @@
             "state": {
               "type": "backlink",
               "state": {
-                "file": "okf/observations/rl-run-1.md",
+                "file": "okf/index.md",
                 "collapseAll": false,
                 "extraContext": false,
                 "sortOrder": "alphabetical",
@@ -118,7 +118,7 @@
             "state": {
               "type": "outgoing-link",
               "state": {
-                "file": "okf/observations/rl-run-1.md",
+                "file": "okf/index.md",
                 "linksCollapsed": false,
                 "unlinkedCollapsed": true
               },
@@ -161,7 +161,7 @@
             "state": {
               "type": "outline",
               "state": {
-                "file": "okf/observations/rl-run-1.md",
+                "file": "okf/index.md",
                 "followCursor": false,
                 "showSearch": false,
                 "searchQuery": ""
@@ -190,6 +190,10 @@
   },
   "active": "4ddf24d6245496cd",
   "lastOpenFiles": [
+    "okf/open-questions.md",
+    "okf/log.md",
+    "okf/experiments.md",
+    "okf/observations/rl-run-1.md",
     "okf/observations/pitfalls.md",
     "okf/observations/cancellation.md",
     "okf/decisions/verbalizer-model.md",
@@ -209,11 +213,7 @@
     "hrm.md",
     "inference.md",
     "design.md",
-    "okf/open-questions.md",
-    "okf/experiments.md",
-    "okf/observations/rl-run-1.md",
     "okf/plans/data-collection-v2.md",
-    "okf/log.md",
     "okf/paper/methods-notes.md",
     "okf/index.md"
   ]

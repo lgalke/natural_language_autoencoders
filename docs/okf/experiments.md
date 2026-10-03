@@ -8,6 +8,8 @@ timestamp: 2026-10-02
 
 # How to use this log
 
+**Pending when this was last updated (2026-10-03):** E7 running; E5's within-dataset shuffle control (`eval --shuffle-vectors --shuffle-within-dataset`) not run; judge for E6/E7 not run; the new-corpus version (v2 plan, HRMMix on disk on the cluster) is parked until after E7.
+
 - **Append-only.** Add a new entry at the bottom for every training run and every evaluation worth keeping; never rewrite old numbers (add a correction line instead).
 - **Each entry:** ID, date, goal or hypothesis, what changed versus the previous run, the exact command(s), artifacts (paths on the cluster), results **with n**, conclusion, and what to do next. Mark anything not verified with CHECK and anything pending with TODO.
 - Numbers from different n or different splits are not directly comparable; the summary table says which n each number has.
@@ -113,4 +115,6 @@ Reference points: chance for always guessing a frequent non-last token is about 
 - **Watch rules:** as E5 (malformed above about 30/128 for several prints, KL above about 0.3 early; FVE recovers towards 0 within about 25 steps). No resume; to continue after a crash, start from a saved step with `--av-sft-ckpt ckpt/rl_tokw/step_N --ar-sft-ckpt ckpt/rl_tokw/step_N` (the KL anchor moves to that checkpoint).
 - **Planned evaluation:** `eval --limit 100 --max-new-tokens 400` on `step_300`, `step_700`, `step_1000` and `final` (quote accuracy on non-last positions, FVE, grounding), then for the chosen checkpoint the full suite: plain and within-dataset shuffle controls, `nla.hrm.baselines`, and the judge with `--mean-from rl.parquet`.
 - **Launch log (steps 1 to 47):** 52.9 s for step 1, then about 37 s/step (ETA about 13 h); malformed 7/128 at step 1, 0 to 1/128 from step 15 (one spike of 6/128 at step 25); training-rollout `fve_sum` / L / H -4.03 / -3.42 / -9.60 at step 1, about 0 at step 15 to 20, 0.07 to 0.32 (sum) at steps 25 to 45; reward 7.9 to about 10; KL only 0.002 to 0.008 (E5's first steps were higher), so early gains are mostly AR calibration; CJK hits 0 to 2/128 from step 1 (present in the SFT model).
+- **Progress (50-step block means of the logged training-rollout `fve_sum`, steps 1 to 100):** steps 1 to 50: -0.405 (includes the calibration burn-in); steps 51 to 100: +0.318. Rising; single lines are noisy (one batch of 16 prompts). Only a trend across about three blocks, together with rising malformed counts or KL, would be a problem. Next checks at blocks 101 to 150 and 151 to 200; quick `eval --limit 100` on `step_300`, `step_700`, `step_1000`, `final`.
+- **Context:** a talk is due in 3 to 4 days from 2026-10-03; the goal is a usable verbalizer plus an honest evaluation (limitations to state: invented narrative details with 2% to 16% grounding; E5's judge result at mean-ablation level; E7's judge not yet run).
 - **Results:** TODO.
