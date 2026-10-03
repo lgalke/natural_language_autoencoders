@@ -24,7 +24,7 @@ timestamp: 2026-10-02
 | E4 | SFT v2, token prefix (`ckpt/av_sft_tok`, `ckpt/ar_sft_tok`) | iid -2.9 / -2.8 / -8.0; ood -2.5 / -3.1 / -7.5 (n=100) | iid 22% (n=87); ood 9% (n=88) | not run | +0.0273 | done |
 | E5 | RL run 3 on E4 (`ckpt/rl_tok`) | iid 0.23 / 0.21 / 0.25; ood 0.03 / -0.02 / 0.19 (n=100); non-last: iid 0.15 / 0.14 / 0.15, ood -0.07 / -0.12 / 0.10 | iid 19% (n=87); ood 8% (n=88) | iid -0.15 / -0.04, ood 0.18 / -1.48 (n=100) | not measured | done; within-dataset shuffle pending |
 | E6 | SFT with token-span loss weight 8 (`ckpt/av_sft_tokw`, AR from E4) | iid -2.03 / -2.64 / -8.10; ood -2.25 / -3.19 / -8.40 (n=100; SFT-only, uncalibrated AR) | iid 49% (n=87); ood 30% (n=88) | not run | all-token +0.0392; token-span +0.7533 | done |
-| E7 | RL on E6 (`ckpt/rl_tokw`), 1300 steps | TODO | TODO | TODO | TODO | planned |
+| E7 | RL on E6 (`ckpt/rl_tokw`), 1300 steps | TODO | TODO | TODO | TODO | running (launched 2026-10-03) |
 
 Reference points: chance for always guessing a frequent non-last token is about 5%; a linear probe reads the marked token with 99% accuracy from z_H (see [token probe](/observations/token-probe.md)). FVE after SFT only is strongly negative because the reconstructor's scale is uncalibrated; online AR training in RL repairs it within about 25 steps.
 
@@ -112,4 +112,5 @@ Reference points: chance for always guessing a frequent non-last token is about 
 - **Command:** `python -u -m nla.hrm.train_rl --rl-parquet rl.parquet --eval-parquet eval_iid_clean.parquet --av-sft-ckpt ckpt/av_sft_tokw --ar-sft-ckpt ckpt/ar_sft_tok --log-reward --batch-size 16 --group-size 8 --policy-lr 1e-5 --kl-beta 0.05 --max-new-tokens 400 --steps 1300 --save-every 100 --eval-every 100 --output ckpt/rl_tokw`. CHECK that this is what was launched.
 - **Watch rules:** as E5 (malformed above about 30/128 for several prints, KL above about 0.3 early; FVE recovers towards 0 within about 25 steps). No resume; to continue after a crash, start from a saved step with `--av-sft-ckpt ckpt/rl_tokw/step_N --ar-sft-ckpt ckpt/rl_tokw/step_N` (the KL anchor moves to that checkpoint).
 - **Planned evaluation:** `eval --limit 100 --max-new-tokens 400` on `step_300`, `step_700`, `step_1000` and `final` (quote accuracy on non-last positions, FVE, grounding), then for the chosen checkpoint the full suite: plain and within-dataset shuffle controls, `nla.hrm.baselines`, and the judge with `--mean-from rl.parquet`.
+- **Launch log (steps 1 to 47):** 52.9 s for step 1, then about 37 s/step (ETA about 13 h); malformed 7/128 at step 1, 0 to 1/128 from step 15 (one spike of 6/128 at step 25); training-rollout `fve_sum` / L / H -4.03 / -3.42 / -9.60 at step 1, about 0 at step 15 to 20, 0.07 to 0.32 (sum) at steps 25 to 45; reward 7.9 to about 10; KL only 0.002 to 0.008 (E5's first steps were higher), so early gains are mostly AR calibration; CJK hits 0 to 2/128 from step 1 (present in the SFT model).
 - **Results:** TODO.
