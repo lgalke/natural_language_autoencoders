@@ -134,6 +134,22 @@ def _dump_samples(path: str, split: str, results: list[dict], weights: ReconWeig
 _QUOTE_RE = re.compile(r"""marked token\s*[:\-]?\s*[“"'`‘]([^”"'`’]{1,40})[”"'`’]""", re.I)
 
 
+def shuffle_permutation(rows: list[dict], within_dataset: bool) -> list[int]:
+    """perm[i] = index of the row whose vector is used for row i (rolled by one; within each dataset if asked).
+    Single-row datasets map to themselves; callers should report how many rows are unshuffled."""
+    n = len(rows)
+    if not within_dataset:
+        return [(i + 1) % n for i in range(n)]
+    groups: dict[str, list[int]] = {}
+    for i, r in enumerate(rows):
+        groups.setdefault(r.get("dataset"), []).append(i)
+    perm = list(range(n))
+    for idxs in groups.values():
+        for a, b in zip(idxs, idxs[1:] + idxs[:1], strict=True):
+            perm[a] = b
+    return perm
+
+
 def marked_token(context_marked: str | None) -> str | None:
     m = re.search(r"⟦(.*?)⟧", context_marked or "", re.S)
     return m.group(1) if m else None
@@ -299,6 +315,10 @@ def main() -> None:
                     help="parquet with z_L/z_H (e.g. rl.parquet) to compute the mean-ablation baselines for the judge "
                          "(adds 'fraction of KL recovered'); strongly recommended with --run-judge")
     p.add_argument("--run-judge", action="store_true")
+    p.add_argument("--judge-shuffle", choices=["roll", "within-dataset"], default=None,
+                   help="with --run-judge: ALSO run the judge with each row patched by ANOTHER row's reconstruction "
+                        "(rolled by one, or rolled within each dataset); stored as report['judge_shuffled']. Control for "
+                        "'any plausible vector beats the mean vector'.")
     p.add_argument("--base-model", default=None)
     p.add_argument("--output", required=True)
     args = p.parse_args()
@@ -387,21 +407,37 @@ def main() -> None:
             judge_rows = [r["row"] for r in ok]
             zL_hat = torch.stack([r["z_L_hat"] for r in ok])
             zH_hat = torch.stack([r["z_H_hat"] for r in ok])
+            import statistics
+
+            def _line(tag, j):
+                pr = j["primary"]
+                msg = (f"[{tag}:{name}] sum-patch KL at position mean={statistics.mean(pr['kl_pred_at_patch']):.4f} "
+                       f"(noise floor, stored gold: {statistics.mean(pr['kl_true_at_patch']):.4f})")
+                if "frac_kl_recovered" in pr:
+                    fr = [v for v in pr["frac_kl_recovered"] if v == v]
+                    msg += f"  fraction of KL recovered vs mean-ablation: {statistics.mean(fr):.3f}" if fr else ""
+                    km = pr["kl_mean_ablation_at_patch"]
+                    msg += f" (ratio of means {1 - statistics.mean(pr['kl_pred_at_patch']) / statistics.mean(km):+.3f})"
+                sec = j["secondary_zH"]
+                msg += f"  | z_H-only patch KL mean={statistics.mean(sec['kl_pred_at_patch']):.4f}"
+                if "frac_kl_recovered" in sec:
+                    fr = [v for v in sec["frac_kl_recovered"] if v == v]
+                    msg += f" recovered={statistics.mean(fr):.3f}" if fr else ""
+                print(msg)
+
             j = run_judge(mimir_model, mimir_tok, judge_rows, zL_hat, zH_hat, args.device, mean_s, mean_zH)
             report["judge"][name] = j
-            import statistics
-            pr = j["primary"]
-            msg = (f"[judge:{name}] sum-patch KL at position mean={statistics.mean(pr['kl_pred_at_patch']):.4f} "
-                   f"(noise floor, stored gold: {statistics.mean(pr['kl_true_at_patch']):.4f})")
-            if "frac_kl_recovered" in pr:
-                fr = [v for v in pr["frac_kl_recovered"] if v == v]
-                msg += f"  fraction of KL recovered vs mean-ablation: {statistics.mean(fr):.3f}" if fr else ""
-            sec = j["secondary_zH"]
-            msg += f"  | z_H-only patch KL mean={statistics.mean(sec['kl_pred_at_patch']):.4f}"
-            if "frac_kl_recovered" in sec:
-                fr = [v for v in sec["frac_kl_recovered"] if v == v]
-                msg += f" recovered={statistics.mean(fr):.3f}" if fr else ""
-            print(msg)
+            _line("judge", j)
+            if args.judge_shuffle:
+                perm = shuffle_permutation(judge_rows, args.judge_shuffle == "within-dataset")
+                n_same = sum(a == b for a, b in enumerate(perm))
+                if n_same:
+                    print(f"  [judge-shuffle] {n_same} row(s) have no other row to swap with and keep their own vector")
+                idx = torch.tensor(perm)
+                js = run_judge(mimir_model, mimir_tok, judge_rows, zL_hat[idx], zH_hat[idx], args.device, mean_s, mean_zH)
+                js["permutation"] = perm
+                report.setdefault("judge_shuffled", {})[name] = js
+                _line(f"judge-shuffled/{args.judge_shuffle}", js)
 
     with open(args.output, "w") as f:
         json.dump(report, f, indent=2, default=lambda o: o.tolist() if hasattr(o, "tolist") else str(o))
