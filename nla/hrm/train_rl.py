@@ -40,6 +40,7 @@ from nla.hrm.model import (
     DEFAULT_VERBALIZER, add_frozen_reference_adapter, build_inputs_embeds,
     load_rl_checkpoint, load_verbalizer, save_extra_modules,
 )
+from nla.hrm.verifiable import verifiable_bonus, verifiable_terms
 from nla.hrm.recon import ReconLoss, ReconWeights, failed_reward, loss_to_reward, parse_fields, recon_loss
 from nla.hrm.sidecar import HrmDatasetMeta, read_sidecar
 
@@ -239,6 +240,10 @@ def main() -> None:
     p.add_argument("--w-sum", type=float, default=1.0)
     p.add_argument("--w-comp", type=float, default=0.25)
     p.add_argument("--log-reward", action="store_true", help="reward = -log(loss) instead of -loss")
+    p.add_argument("--w-token", type=float, default=0.0,
+                   help="verifiable reward: bonus for quoting the REAL marked token (see verifiable.py); 0 = off")
+    p.add_argument("--w-ground", type=float, default=0.0,
+                   help="verifiable reward: penalty (up to this value) for quoted spans/names not in the prompt; 0 = off")
     p.add_argument("--eval-every", type=int, default=20)
     p.add_argument("--save-every", type=int, default=50)
     p.add_argument("--sanity", action="store_true", help="run the real-vs-shuffled-vectors check before training")
@@ -258,6 +263,9 @@ def main() -> None:
     model, tokenizer = load_verbalizer(verbalizer_model, device=args.device, torch_dtype=dtype)
     d_verb = model.config.hidden_size
     rows, meta = _load_rl_rows(args.rl_parquet)
+    if args.w_token or args.w_ground:
+        assert all(r.get("context_marked") for r in rows[:100]), (
+            "--w-token/--w-ground need the context_marked column in the RL parquet (build with debug metadata)")
     tm = meta.tokens
     assert tm is not None
     inj_l_char, inj_h_char = tm.injection_char_L, tm.injection_char_H
@@ -294,6 +302,15 @@ def main() -> None:
             rewards, parsed, mses = compute_rewards(model, tokenizer, heads, critic_template, texts, z_L, z_H,
                                                 weights, args.device, args.log_reward)
             fve = fve_from_mses(mses, baseline)
+            verif = {}
+            if args.w_token or args.w_ground:
+                terms = [(i, verifiable_terms(p, batch_rows[i // args.group_size].get("context_marked")))
+                         for i, p in enumerate(parsed) if p is not None]
+                for i, t in terms:
+                    rewards[i] += verifiable_bonus(t, args.w_token, args.w_ground)
+                if terms:
+                    verif = {"token_ok": sum(t["token_correct"] for _, t in terms) / len(terms),
+                             "ungrounded": sum(t["ungrounded"] for _, t in terms) / len(terms)}
             rewards_t = torch.tensor(rewards, dtype=torch.float32).view(len(batch_rows), args.group_size)
             mean, std = rewards_t.mean(dim=1, keepdim=True), rewards_t.std(dim=1, keepdim=True).clamp_min(1e-4)
             advantages = ((rewards_t - mean) / std).view(-1)
@@ -321,7 +338,7 @@ def main() -> None:
                 print(f"step={step} mean_reward={sum(rewards)/len(rewards):.4f} pg_loss={pg_loss:.4f} "
                       f"kl={kl_loss:.5f} ar_loss={ar_loss.total.item() if ar_loss else float('nan'):.4f} "
                       f"malformed={n_malformed}/{len(texts)} cjk_leak={n_cjk_leak}/{len(texts)}"
-                      + "".join(f" {k}={v:.3f}" for k, v in fve.items()))
+                      + "".join(f" {k}={v:.3f}" for k, v in {**fve, **verif}.items()))
                 if n_cjk_leak > 0:
                     print(f"  WARNING: {n_cjk_leak} completions contain CJK chars — possible injection failure "
                           f"(the marker char leaking into generated text means it wasn't found/overwritten).")
