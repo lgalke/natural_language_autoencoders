@@ -19,11 +19,23 @@ import pyarrow.parquet as pq
 
 def ridge_r2(x_tr, y_tr, x_te, y_te, lam: float = 1.0) -> float:
     """R^2 of a ridge regression y ~ x on held-out rows, relative to the train-mean predictor."""
-    mx, my = x_tr.mean(0), y_tr.mean(0)
-    xc, yc = x_tr - mx, y_tr - my
-    w = np.linalg.solve(xc.T @ xc + lam * np.eye(xc.shape[1]) * len(xc) / xc.shape[1], xc.T @ yc)
-    pred = (x_te - mx) @ w + my
-    return 1.0 - ((y_te - pred) ** 2).sum() / ((y_te - my) ** 2).sum()
+    return ridge_r2_multi(x_tr, {"y": y_tr}, x_te, {"y": y_te}, lam)["y"]
+
+
+def ridge_r2_multi(x_tr, ys_tr: dict, x_te, ys_te: dict, lam: float = 1.0) -> dict:
+    """Same, for several targets sharing one design matrix: the Gram matrix is computed and factorised once."""
+    mx = x_tr.mean(0)
+    xc = (x_tr - mx).astype(np.float32)
+    gram = (xc.T @ xc).astype(np.float64)
+    gram += lam * np.eye(gram.shape[0]) * len(xc) / gram.shape[0]
+    xte = (x_te - mx).astype(np.float32)
+    out = {}
+    for k, y_tr in ys_tr.items():
+        my = y_tr.mean(0)
+        w = np.linalg.solve(gram, (xc.T @ (y_tr - my).astype(np.float32)).astype(np.float64)).astype(np.float32)
+        pred = xte @ w + my
+        out[k] = float(1.0 - ((ys_te[k] - pred) ** 2).sum() / ((ys_te[k] - my) ** 2).sum())
+    return out
 
 
 def shared_normalise(zl: np.ndarray, zh: np.ndarray):
@@ -50,8 +62,10 @@ def main() -> None:
     print(f"{n} rows ({tr.sum()} train / {te.sum()} test, split by document)")
     cos = (zl * zh).sum(-1) / (np.linalg.norm(zl, axis=1) * np.linalg.norm(zh, axis=1))
     print(f"mean cos(z_L, z_H) = {cos.mean():.3f}; |s|^2 share of (|z_L|^2+|z_H|^2) = {(s**2).sum() / ((zl**2).sum() + (zh**2).sum()):.3f}")
-    for name, x, y in (("z_L from z_H", zh, zl), ("z_H from z_L", zl, zh), ("sum from z_H", zh, s), ("sum from z_L", zl, s)):
-        print(f"  R^2 {name}: {ridge_r2(x[tr], y[tr], x[te], y[te], args.lam):.3f}")
+    for xname, x, targets in (("z_H", zh, {"z_L": zl, "sum": s}), ("z_L", zl, {"z_H": zh, "sum": s})):
+        r2 = ridge_r2_multi(x[tr], {k: v[tr] for k, v in targets.items()}, x[te], {k: v[te] for k, v in targets.items()}, args.lam)
+        for k, v in r2.items():
+            print(f"  R^2 {k} from {xname}: {v:.3f}", flush=True)
     by = collections.defaultdict(list)
     for i, d in enumerate(ds):
         by[d].append(i)
