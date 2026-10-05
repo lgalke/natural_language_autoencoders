@@ -43,9 +43,16 @@ _D_MIMIR = 1536
 
 @torch.no_grad()
 def generate_and_reconstruct(model, tokenizer, rows, inj_l_char, inj_h_char, inj_L, inj_H, heads, ids_meta,
-                               critic_template, device, max_new_tokens=300, batch_size=16, shuffle_vectors=False, within_dataset=False):
+                               critic_template, device, max_new_tokens=300, batch_size=16, shuffle_vectors=False, within_dataset=False,
+                               swap_streams=False):
     from nla.hrm.model import build_inputs_embeds
 
+    # Swap control: each stream keeps its own adapter but is written into the OTHER stream's slot (z_L's adapted vector at
+    # the [H] marker, z_H's at the [L] marker) by swapping the marker ids. If the L/H text difference follows the slot the
+    # text is a position artefact; if it follows the vector it is stream-specific. Scored against the original gold.
+    assert not (swap_streams and shuffle_vectors), "--swap-streams and --shuffle-vectors are separate controls"
+    if swap_streams:
+        ids_meta = ids_meta[3:] + ids_meta[:3]
     out = []
     # Control: inject the vectors of a DIFFERENT row (rolled by one) while still scoring against the
     # original row's gold vectors. If FVE does not drop, the verbalizer is ignoring the vector.
@@ -314,6 +321,10 @@ def main() -> None:
     p.add_argument("--mean-from", default=None,
                     help="parquet with z_L/z_H (e.g. rl.parquet) to compute the mean-ablation baselines for the judge "
                          "(adds 'fraction of KL recovered'); strongly recommended with --run-judge")
+    p.add_argument("--swap-streams", action="store_true",
+                   help="control: write z_L's (adapted) vector into the [H] slot and z_H's into the [L] slot; generations are "
+                        "cached under a separate '_swap' name. Use with --dump-samples to see whether the L/H text follows "
+                        "the slot or the vector")
     p.add_argument("--run-judge", action="store_true")
     p.add_argument("--judge-shuffle", choices=["roll", "within-dataset"], default=None,
                    help="with --run-judge: ALSO run the judge with each row patched by ANOTHER row's reconstruction "
@@ -347,7 +358,7 @@ def main() -> None:
         assert tm is not None
         ids_meta = (tm.injection_token_id_L, tm.injection_left_neighbor_id_L, tm.injection_right_neighbor_id_L,
                     tm.injection_token_id_H, tm.injection_left_neighbor_id_H, tm.injection_right_neighbor_id_H)
-        gen_path = f"{args.output}.gen_{name}{('_shufds' if args.shuffle_within_dataset else '_shuf') if args.shuffle_vectors else ''}.pt"
+        gen_path = f"{args.output}.gen_{name}{('_shufds' if args.shuffle_within_dataset else '_shuf') if args.shuffle_vectors else ''}{'_swap' if args.swap_streams else ''}.pt"
         if args.reuse_generations and Path(gen_path).exists():
             saved = torch.load(gen_path)
             assert len(saved) == len(rows), f"{gen_path} has {len(saved)} rows, split now has {len(rows)}; drop --reuse-generations"
@@ -356,7 +367,8 @@ def main() -> None:
         else:
             results = generate_and_reconstruct(model, tokenizer, rows, tm.injection_char_L, tm.injection_char_H,
                                                  inj_L, inj_H, heads, ids_meta, meta.prompt_templates["critic"], args.device,
-                                                 args.max_new_tokens, args.batch_size, args.shuffle_vectors, args.shuffle_within_dataset)
+                                                 args.max_new_tokens, args.batch_size, args.shuffle_vectors, args.shuffle_within_dataset,
+                                                 args.swap_streams)
             torch.save([{k: v for k, v in r.items() if k != "row"} for r in results], gen_path)
         all_results[name] = results
         if args.dump_samples:
