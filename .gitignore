@@ -20,7 +20,6 @@ nla/hrm/injection_token_cache_hrm.yaml
 /*.parquet.diagnostics*
 /corpus.jsonl
 /norm_stats.json
-/samples_*.jsonl
 /eval_*.json
 /judge*.json
 /recon.json
