@@ -56,6 +56,33 @@ def main() -> None:
         print(f"  accuracy against the SLOT label (L field = 0, H field = 1): {(pred == y2).mean():.3f}")
         print(f"  share of L-slot texts classified as H: {(pred[y2 == 0] == 1).mean():.3f}; "
               f"share of H-slot texts classified as L: {(pred[y2 == 1] == 0).mean():.3f}")
+        compare_rows(args.samples, args.apply)
+
+
+def _words(t: str) -> set[str]:
+    return set(re.findall(r"[a-zA-Z']+", strip_prefix(t).lower()))
+
+
+def compare_rows(path_a: str, path_b: str) -> None:
+    """Row-aligned comparison of two dumps made with the same --limit/seed (e.g. normal vs --swap-streams):
+    does the L field of A look more like the L field of B (follows the SLOT) or the H field of B (follows the VECTOR)?"""
+    a = [json.loads(line) for line in open(path_a, encoding="utf-8") if line.strip()]
+    b = [json.loads(line) for line in open(path_b, encoding="utf-8") if line.strip()]
+    pairs = [(x, y) for x, y in zip(a, b, strict=True)
+             if x.get("L_field") and y.get("L_field") and x["context_marked"] == y["context_marked"]]
+    print(f"  row-aligned pairs: {len(pairs)} of {len(a)}")
+    if not pairs:
+        return
+
+    def jac(u: str, v: str) -> float:
+        x, y = _words(u), _words(v)
+        return len(x & y) / max(1, len(x | y))
+
+    for name, fa, fb in (("L(A) vs L(B)", "L_field", "L_field"), ("L(A) vs H(B)", "L_field", "H_field"),
+                         ("H(A) vs H(B)", "H_field", "H_field"), ("H(A) vs L(B)", "H_field", "L_field")):
+        print(f"  word-set Jaccard {name}: {np.mean([jac(x[fa], y[fb]) for x, y in pairs]):.3f}")
+    same = np.mean([x["completion"].strip() == y["completion"].strip() for x, y in pairs])
+    print(f"  identical completions: {same:.1%}")
 
 
 if __name__ == "__main__":
