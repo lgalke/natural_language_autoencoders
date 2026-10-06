@@ -46,6 +46,26 @@ def ridge_r2_multi(x_tr, ys_tr: dict, x_te, ys_te: dict, lam: float = 1.0, devic
     return out
 
 
+def ridge_fit(x_tr, y_tr, lam: float = 1.0, device: str = "cpu"):
+    """Fit y ~ x (ridge, centred) on the train rows; returns predict(x) -> numpy array of predictions."""
+    import torch
+
+    def t(a):
+        return torch.as_tensor(np.asarray(a), dtype=torch.float32, device=device)
+
+    x_tr, y_tr = t(x_tr), t(y_tr)
+    mx, my = x_tr.mean(0), y_tr.mean(0)
+    xc = x_tr - mx
+    gram = (xc.T @ xc).double()
+    gram += lam * torch.eye(gram.shape[0], dtype=gram.dtype, device=device) * len(xc) / gram.shape[0]
+    w = torch.linalg.solve(gram, (xc.T @ (y_tr - my)).double()).float()
+
+    def predict(x):
+        return ((t(x) - mx) @ w + my).cpu().numpy()
+
+    return predict
+
+
 def shared_normalise(zl: np.ndarray, zh: np.ndarray):
     c = np.sqrt((zl**2).sum(-1, keepdims=True) + (zh**2).sum(-1, keepdims=True)).clip(1e-12)
     return zl / c, zh / c

@@ -22,6 +22,8 @@ from collections import defaultdict
 import numpy as np
 import pyarrow.parquet as pq
 
+from nla.hrm.lh_variance import ridge_fit
+
 
 def _norm_pair(zl: np.ndarray, zh: np.ndarray):
     c = np.sqrt((zl**2).sum(-1, keepdims=True) + (zh**2).sum(-1, keepdims=True)).clip(1e-12)
@@ -41,6 +43,8 @@ def main() -> None:
     p.add_argument("--norm-stats-json", default="norm_stats.json")
     p.add_argument("--limit", type=int, default=None)
     p.add_argument("--min-token-rows", type=int, default=3)
+    p.add_argument("--device", default="cuda" if __import__("torch").cuda.is_available() else "cpu",
+                   help="device for the cross-stream ridge baselines")
     args = p.parse_args()
     base_mse = json.load(open(args.norm_stats_json))["mean_mse"]
 
@@ -91,6 +95,13 @@ def main() -> None:
         yield "per TRUE marked token", tk[1:] if tk and tk[0] >= args.min_token_rows else (fb[1:] if fb else g_all)
 
     names = ["global mean", "per dataset", "per dataset x last-pos", "per TRUE marked token"]
+    # Cross-stream linear baselines: predict one stream (and the sum) from the TRUE other stream with a ridge fit on the
+    # train rows. Their FVE is the share of one stream's variation that the other stream already explains linearly; a
+    # verbalizer whose L/H FVE equals these captures only the SHARED part of the streams.
+    tr = np.array(train)
+    s_all = nl + nh
+    from_H = {"L": ridge_fit(nh[tr], nl[tr], device=args.device), "sum": ridge_fit(nh[tr], s_all[tr], device=args.device)}
+    from_L = {"H": ridge_fit(nl[tr], nh[tr], device=args.device), "sum": ridge_fit(nl[tr], s_all[tr], device=args.device)}
     for split, idx in evals.items():
         for label, sel in (("all rows", idx), ("non-last rows", [i for i in idx if not last[i]])):
             if not sel:
@@ -102,6 +113,15 @@ def main() -> None:
                 ph = np.stack([dict(predictors(i))[nm][1] for i in sel])
                 s, l_, h = _fve(pl, ph, gl, gh, base_mse)
                 print(f"  {nm:26s} {s:7.3f} {l_:7.3f} {h:7.3f}")
+            sel_a = np.array(sel)
+            for nm, fns, src, key in (("ridge from TRUE z_H", from_H, nh, "L"), ("ridge from TRUE z_L", from_L, nl, "H")):
+                pred_s = fns["sum"](src[sel_a])
+                pred_x = fns[key](src[sel_a])
+                gold_x = (nl if key == "L" else nh)[sel_a]
+                f_s = 1 - ((pred_s - s_all[sel_a]) ** 2).mean() / base_mse["sum"]
+                f_x = 1 - ((pred_x - gold_x) ** 2).mean() / base_mse[key]
+                cols = (f"{f_x:7.3f}  {'-':>7s}" if key == "L" else f"{'-':>7s}  {f_x:7.3f}")
+                print(f"  {nm:26s} {f_s:7.3f} {cols}")
 
 
 if __name__ == "__main__":
