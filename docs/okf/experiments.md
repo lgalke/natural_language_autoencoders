@@ -27,7 +27,7 @@ timestamp: 2026-10-02
 | E5 | RL run 3 on E4 (`ckpt/rl_tok`) | iid 0.23 / 0.21 / 0.25; ood 0.03 / -0.02 / 0.19 (n=100); non-last: iid 0.15 / 0.14 / 0.15, ood -0.07 / -0.12 / 0.10 | iid 19% (n=87); ood 8% (n=88) | iid -0.15 / -0.04, ood 0.18 / -1.48 (n=100) | not measured | done; within-dataset shuffle pending |
 | E6 | SFT with token-span loss weight 8 (`ckpt/av_sft_tokw`, AR from E4) | iid -2.03 / -2.64 / -8.10; ood -2.25 / -3.19 / -8.40 (n=100; SFT-only, uncalibrated AR) | iid 49% (n=87); ood 30% (n=88) | not run | all-token +0.0392; token-span +0.7533 | done |
 | E7 | RL on E6 (`ckpt/rl_tokw`), 1300 steps | `final`: ood 0.037 / -0.041 / 0.264 (n=100); iid overall CHECK (cut off in paste), `step_300` iid 0.213 / 0.165 / 0.281 | iid 51%, ood 33% (n=87/88); content words 30% / 12% | iid 0.469 / ood 0.391 (ratio of means, sum patch; shuffled: negative) | not measured | done; analysis of dump logged |
-| E8 | RL continuation from E7 `final` with `--w-token 0.5 --w-ground 0.5` (`ckpt/rl_ver`) | TODO | TODO | TODO | not measured | implemented, not run |
+| E8 | RL continuation from E7 `final` with `--w-token 0.5 --w-ground 0.5` (`ckpt/rl_ver`) | TODO | TODO | TODO | not measured | run (500 steps); held-out eval pending |
 
 Reference points: chance for always guessing a frequent non-last token is about 5%; a linear probe reads the marked token with 99% accuracy from z_H (see [token probe](/observations/token-probe.md)). FVE after SFT only is strongly negative because the reconstructor's scale is uncalibrated; online AR training in RL repairs it within about 25 steps.
 
@@ -175,7 +175,23 @@ Reference points: chance for always guessing a frequent non-last token is about 
 - **Command:** `python -u -m nla.hrm.train_rl --rl-parquet rl.parquet --eval-parquet eval_iid_clean.parquet --av-sft-ckpt ckpt/rl_tokw/final --ar-sft-ckpt ckpt/rl_tokw/final --log-reward --batch-size 16 --group-size 8 --policy-lr 1e-5 --kl-beta 0.05 --max-new-tokens 400 --steps 500 --save-every 100 --eval-every 100 --w-token 0.5 --w-ground 0.5 --output ckpt/rl_ver`. Expected about 5.5 h (E7: 38 s/step).
 - **Watch:** the step log gains `token_ok` (share of well-formed rollouts with the right token; E7 about 0.49 at eval) and `ungrounded` (mean per rollout; start about 7). Healthy: token_ok rises, ungrounded falls, `fve_sum` stays near 0.3, malformed stays near 0, KL below about 0.1. Problems: `fve_sum` falling for several blocks of 50 steps, completions becoming very short or empty fields (check `samples.jsonl`), malformed rising. The penalty only detects invented quotes and capitalised names; invented lowercase nouns (owl, squirrel, cave) are not penalised, so the model may shift its inventions to those: CHECK with the prop counts.
 - **Planned evaluation:** `eval --limit 100 --max-new-tokens 400` on `step_300` and `final` with `--dump-samples`, then judge (+ both shuffles) on the better one; compare token accuracy by token type, grounding, props, FVE, judge KL to E7 `final`. Fallback: E7 `final` if no clear gain.
-- **Results:** TODO.
+- **Training log, 50-step block means (user paste 2026-10-06; 500 steps done; training rollouts at temperature 1 on training prompts, last positions included, so NOT held-out):**
+
+| steps | fve_sum | token_ok | ungrounded | malformed (of 128) |
+|---|---|---|---|---|
+| 1-50 | 0.324 | 0.515 | 6.56 | 0.5 |
+| 51-100 | 0.433 | 0.613 | 2.79 | 0.0 |
+| 101-150 | 0.400 | 0.627 | 1.69 | 0.1 |
+| 151-200 | 0.416 | 0.703 | 1.12 | 0.2 |
+| 201-250 | 0.372 | 0.625 | 1.11 | 0.1 |
+| 251-300 | 0.341 | 0.619 | 1.26 | 0.4 |
+| 301-350 | 0.339 | 0.656 | 1.10 | 0.3 |
+| 351-400 | 0.332 | 0.604 | 0.88 | 0.1 |
+| 401-450 | 0.344 | 0.682 | 0.49 | 0.0 |
+| 451-500 | 0.302 | 0.579 | 0.78 | 0.1 |
+
+  Reading: the penalty term worked in training (ungrounded quoted spans and names 6.6 to about 1 per explanation by step 150); token_ok rose from 0.52 to 0.60 to 0.70 and then wandered (peak at steps 151 to 200); fve_sum rose first (0.43 at steps 51 to 100) and then drifted down to 0.30, below E7's plateau of about 0.325, which may be the cost of dropping invented specifics (CHECK: could also be noise or KL; KL not pasted). Malformed stayed near 0. `ungrounded` counts only quotes and capitalised names: it can fall because the model quotes less, or because inventions moved to lowercase nouns (CHECK on the dump). Checkpoints are saved every 100 steps and the best FVE plus token reading were at steps 100 to 200, so `step_200` (and maybe `step_100`) must be evaluated next to `final`. Held-out eval: pending.
+- **Results (held-out):** TODO.
 
 # Idea (2026-10-05): enforce L/H separation by verbalizing the streams in separate calls ("split AV")
 
