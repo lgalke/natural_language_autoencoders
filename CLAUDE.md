@@ -104,6 +104,10 @@ of `nla/`.
   writes it and only `build.py --stage rl` carries it through — av_sft/
   ar_sft parquets don't have it (Mimir is never touched again after
   extraction for those stages).
+- **Split AV (`nla/hrm/split_av.py`, `--split-av` in `train_rl`/`eval`).** Optional design where each stream is
+  verbalized in its OWN call (the other stream's vector zeroed, one field written, prompt tagged). Same template,
+  markers, adapters, AR and judge; the two fields are joined by `split_av.join_split` before the unchanged reward.
+  Don't mix split and joint checkpoints: a split AV must be evaluated with `eval --split-av`.
 - **PEFT's nested-adapter-directory save.** `PeftModel.save_pretrained(path,
   selected_adapters=["av"])` writes to `path/av/adapter_config.json`, not
   flat at `path/` (only an adapter literally named `"default"` saves flat).

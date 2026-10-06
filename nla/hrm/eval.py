@@ -44,12 +44,14 @@ _D_MIMIR = 1536
 @torch.no_grad()
 def generate_and_reconstruct(model, tokenizer, rows, inj_l_char, inj_h_char, inj_L, inj_H, heads, ids_meta,
                                critic_template, device, max_new_tokens=300, batch_size=16, shuffle_vectors=False, within_dataset=False,
-                               swap_streams=False, best_of=1, sample_temperature=1.0, weights=None):
+                               swap_streams=False, best_of=1, sample_temperature=1.0, weights=None, split_av=False):
     from nla.hrm.model import build_inputs_embeds
 
     # Best-of-N: candidate 0 is the greedy completion, candidates 1..N-1 are temperature samples of the same prompt; the
     # one whose AR reconstruction is closest to the row's GOLD vectors (recon loss) is kept. Uses the true vector, so the
     # selected FVE is optimistic (selection on the metric); token accuracy and text checks are independent of it.
+    assert not split_av or (best_of == 1 and not swap_streams and not shuffle_vectors), (
+        "--split-av is not combined with best-of / swap / shuffle")
     assert best_of == 1 or (weights is not None and not swap_streams and not shuffle_vectors), (
         "best-of-N needs recon weights and is not combined with the shuffle / swap controls")
 
@@ -79,26 +81,31 @@ def generate_and_reconstruct(model, tokenizer, rows, inj_l_char, inj_h_char, inj
     for start in tqdm(range(0, len(rows), batch_size), desc="rollout"):
         batch_rows = rows[start : start + batch_size]
         inj_rows = inject_rows[start : start + batch_size]
-        contents = [r["prompt"][0]["content"].replace(_INJECT_L_PLACEHOLDER, inj_l_char)
-                    .replace(_INJECT_H_PLACEHOLDER, inj_h_char) for r in batch_rows]
-        tokenizer.padding_side = "left"
-        enc = tokenizer.apply_chat_template(
-            [[{"role": "user", "content": c}] for c in contents],
-            tokenize=True, add_generation_prompt=True, return_tensors="pt", return_dict=True, padding=True,
-        )
-        input_ids, attn = enc["input_ids"].to(device), enc["attention_mask"].to(device)
-        z_L = torch.tensor([r["z_L"] for r in inj_rows], dtype=torch.float32, device=device)
-        z_H = torch.tensor([r["z_H"] for r in inj_rows], dtype=torch.float32, device=device)
-        embeds = build_inputs_embeds(model, input_ids, z_L, z_H, inj_L, inj_H, *ids_meta)
-        model.set_adapter("av")
-        gen_ids = model.generate(inputs_embeds=embeds, attention_mask=attn, max_new_tokens=max_new_tokens,
-                                   do_sample=False, pad_token_id=tokenizer.pad_token_id)
-        cand_texts = [tokenizer.batch_decode(gen_ids, skip_special_tokens=True)]
-        for _ in range(best_of - 1):
-            sampled = model.generate(inputs_embeds=embeds, attention_mask=attn, max_new_tokens=max_new_tokens,
-                                       do_sample=True, temperature=sample_temperature, top_p=1.0, top_k=0,
-                                       pad_token_id=tokenizer.pad_token_id)
-            cand_texts.append(tokenizer.batch_decode(sampled, skip_special_tokens=True))
+        if split_av:
+            cand_texts = [_split_greedy(model, tokenizer, batch_rows, inj_l_char, inj_h_char, inj_L, inj_H, ids_meta,
+                                        device, max_new_tokens)]
+        else:
+            contents = [r["prompt"][0]["content"].replace(_INJECT_L_PLACEHOLDER, inj_l_char)
+                        .replace(_INJECT_H_PLACEHOLDER, inj_h_char) for r in batch_rows]
+            tokenizer.padding_side = "left"
+            enc = tokenizer.apply_chat_template(
+                [[{"role": "user", "content": c}] for c in contents],
+                tokenize=True, add_generation_prompt=True, return_tensors="pt", return_dict=True, padding=True,
+            )
+            input_ids, attn = enc["input_ids"].to(device), enc["attention_mask"].to(device)
+            z_L = torch.tensor([r["z_L"] for r in inj_rows], dtype=torch.float32, device=device)
+            z_H = torch.tensor([r["z_H"] for r in inj_rows], dtype=torch.float32, device=device)
+            embeds = build_inputs_embeds(model, input_ids, z_L, z_H, inj_L, inj_H, *ids_meta)
+            model.set_adapter("av")
+            gen_ids = model.generate(inputs_embeds=embeds, attention_mask=attn, max_new_tokens=max_new_tokens,
+                                       do_sample=False, pad_token_id=tokenizer.pad_token_id)
+            cand_texts = [tokenizer.batch_decode(gen_ids, skip_special_tokens=True)]
+            for _ in range(best_of - 1):
+                sampled = model.generate(inputs_embeds=embeds, attention_mask=attn, max_new_tokens=max_new_tokens,
+                                           do_sample=True, temperature=sample_temperature, top_p=1.0, top_k=0,
+                                           pad_token_id=tokenizer.pad_token_id)
+                cand_texts.append(tokenizer.batch_decode(sampled, skip_special_tokens=True))
+
 
         def _reconstruct(texts):
             parsed = [parse_fields(t) for t in texts]
@@ -140,6 +147,36 @@ def generate_and_reconstruct(model, tokenizer, rows, inj_l_char, inj_h_char, inj
                 "z_L_hat": zl_c[i], "z_H_hat": zh_c[i], **({"bo": bo} if bo else {}),
             })
     return out
+
+
+@torch.no_grad()
+def _split_greedy(model, tokenizer, batch_rows, inj_l_char, inj_h_char, inj_L, inj_H, ids_meta, device, max_new_tokens):
+    """Split AV: greedy L call (z_H zeroed) and H call (z_L zeroed), joined into one completion per row."""
+    from nla.hrm.model import build_inputs_embeds
+    from nla.hrm.split_av import join_split, tag_content
+
+    outs = {}
+    for described, zeroed in (("L", "H"), ("H", "L")):
+        contents = [tag_content(r["prompt"][0]["content"].replace(_INJECT_L_PLACEHOLDER, inj_l_char)
+                                .replace(_INJECT_H_PLACEHOLDER, inj_h_char), described) for r in batch_rows]
+        tokenizer.padding_side = "left"
+        enc = tokenizer.apply_chat_template(
+            [[{"role": "user", "content": c}] for c in contents],
+            tokenize=True, add_generation_prompt=True, return_tensors="pt", return_dict=True, padding=True,
+        )
+        input_ids, attn = enc["input_ids"].to(device), enc["attention_mask"].to(device)
+        z_L = torch.tensor([r["z_L"] for r in batch_rows], dtype=torch.float32, device=device)
+        z_H = torch.tensor([r["z_H"] for r in batch_rows], dtype=torch.float32, device=device)
+        if zeroed == "L":
+            z_L = torch.zeros_like(z_L)
+        else:
+            z_H = torch.zeros_like(z_H)
+        embeds = build_inputs_embeds(model, input_ids, z_L, z_H, inj_L, inj_H, *ids_meta)
+        model.set_adapter("av")
+        gen = model.generate(inputs_embeds=embeds, attention_mask=attn, max_new_tokens=max_new_tokens,
+                             do_sample=False, pad_token_id=tokenizer.pad_token_id)
+        outs[described] = tokenizer.batch_decode(gen, skip_special_tokens=True)
+    return [join_split(a, b) for a, b in zip(outs["L"], outs["H"], strict=True)]
 
 
 def best_of_report(name: str, results: list[dict]) -> None:
@@ -376,6 +413,9 @@ def main() -> None:
                         "reconstruction is closest to the gold vectors; FVE is then selection-biased, token accuracy "
                         "and text are not. Cached as <output>.gen_<split>_bo<N>.pt")
     p.add_argument("--sample-temperature", type=float, default=1.0)
+    p.add_argument("--split-av", action="store_true",
+                   help="the AV checkpoint is a split AV (nla/hrm/split_av.py): greedy L call (z_H zeroed) and H call "
+                        "(z_L zeroed); cached as <output>.gen_<split>_split.pt")
     p.add_argument("--run-judge", action="store_true")
     p.add_argument("--judge-shuffle", choices=["roll", "within-dataset"], default=None,
                    help="with --run-judge: ALSO run the judge with each row patched by ANOTHER row's reconstruction "
@@ -411,7 +451,7 @@ def main() -> None:
         assert tm is not None
         ids_meta = (tm.injection_token_id_L, tm.injection_left_neighbor_id_L, tm.injection_right_neighbor_id_L,
                     tm.injection_token_id_H, tm.injection_left_neighbor_id_H, tm.injection_right_neighbor_id_H)
-        gen_path = f"{args.output}.gen_{name}{('_shufds' if args.shuffle_within_dataset else '_shuf') if args.shuffle_vectors else ''}{'_swap' if args.swap_streams else ''}{f'_bo{args.best_of}' if args.best_of > 1 else ''}.pt"
+        gen_path = f"{args.output}.gen_{name}{('_shufds' if args.shuffle_within_dataset else '_shuf') if args.shuffle_vectors else ''}{'_swap' if args.swap_streams else ''}{f'_bo{args.best_of}' if args.best_of > 1 else ''}{'_split' if args.split_av else ''}.pt"
         if args.reuse_generations and Path(gen_path).exists():
             saved = torch.load(gen_path)
             assert len(saved) == len(rows), f"{gen_path} has {len(saved)} rows, split now has {len(rows)}; drop --reuse-generations"
@@ -421,7 +461,7 @@ def main() -> None:
             results = generate_and_reconstruct(model, tokenizer, rows, tm.injection_char_L, tm.injection_char_H,
                                                  inj_L, inj_H, heads, ids_meta, meta.prompt_templates["critic"], args.device,
                                                  args.max_new_tokens, args.batch_size, args.shuffle_vectors, args.shuffle_within_dataset,
-                                                 args.swap_streams, args.best_of, args.sample_temperature, weights)
+                                                 args.swap_streams, args.best_of, args.sample_temperature, weights, args.split_av)
             torch.save([{k: v for k, v in r.items() if k != "row"} for r in results], gen_path)
         best_of_report(name, results)
         all_results[name] = results

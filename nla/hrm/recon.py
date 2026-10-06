@@ -23,6 +23,23 @@ from nla.schema import extract_explanation
 _LH_RE = re.compile(r"L:\s*(.*?)\s*\nH:\s*(.*)$", re.DOTALL)
 
 
+_OTHER_HEADER_RE = re.compile(r"\n\s*[LH]:\s")
+
+
+def parse_single(completion_text: str, stream: str) -> str | None:
+    """Split-AV output: `<explanation>\nL: ...\n</explanation>` (or H). Returns the field text, None if the tags or the
+    header are missing or the field is empty; a second field header the model may add is cut off."""
+    assert stream in ("L", "H")
+    payload = extract_explanation(completion_text)
+    if payload is None:
+        return None
+    m = re.match(rf"{stream}:\s*(.*)$", payload, re.DOTALL)
+    if m is None:
+        return None
+    text = _OTHER_HEADER_RE.split(m.group(1))[0].strip()
+    return text or None
+
+
 def parse_fields(completion_text: str) -> tuple[str, str] | None:
     """Extract (L_field, H_field) from a raw AV completion. None if the
     `<explanation>` tags are missing/unclosed, the `L:`/`H:` fields don't

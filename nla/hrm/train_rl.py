@@ -43,6 +43,7 @@ from nla.hrm.model import (
 from nla.hrm.verifiable import verifiable_bonus, verifiable_terms
 from nla.hrm.recon import ReconLoss, ReconWeights, failed_reward, loss_to_reward, parse_fields, recon_loss
 from nla.hrm.sidecar import HrmDatasetMeta, read_sidecar
+from nla.hrm.split_av import join_split, tag_content
 
 _D_MIMIR = 1536
 _CJK_RE = re.compile(r"[㈀-㏿一-鿿]")
@@ -59,13 +60,24 @@ def _extra_content(row: dict, inj_l_char: str, inj_h_char: str) -> str:
     return row["prompt"][0]["content"].replace(_INJECT_L_PLACEHOLDER, inj_l_char).replace(_INJECT_H_PLACEHOLDER, inj_h_char)
 
 
+def _mask_streams(z_L: torch.Tensor, z_H: torch.Tensor, mask_stream: str | None):
+    """Split AV: zero the masked stream (the gold vectors used for the reward stay untouched)."""
+    if mask_stream == "L":
+        return torch.zeros_like(z_L), z_H
+    if mask_stream == "H":
+        return z_L, torch.zeros_like(z_H)
+    return z_L, z_H
+
+
 @torch.no_grad()
 def _generate_batch(model, tokenizer, rows, inj_l_char, inj_h_char, inj_L, inj_H, ids_meta, device,
-                     group_size: int, max_new_tokens: int, temperature: float):
+                     group_size: int, max_new_tokens: int, temperature: float, mask_stream: str | None = None):
     """rows: B activation rows. Returns per-(row,sample) generated text + the
     full token sequence (for logp scoring) + prompt length S (constant across
     the batch thanks to left-padding)."""
     contents = [_extra_content(r, inj_l_char, inj_h_char) for r in rows for _ in range(group_size)]
+    if mask_stream:  # split AV: describe the OTHER stream; this one is zeroed in the embeddings below
+        contents = [tag_content(c, "H" if mask_stream == "L" else "L") for c in contents]
     tokenizer.padding_side = "left"
     enc = tokenizer.apply_chat_template(
         [[{"role": "user", "content": c}] for c in contents],
@@ -77,7 +89,7 @@ def _generate_batch(model, tokenizer, rows, inj_l_char, inj_h_char, inj_L, inj_H
 
     z_L = torch.tensor([r["z_L"] for r in rows for _ in range(group_size)], dtype=torch.float32, device=device)
     z_H = torch.tensor([r["z_H"] for r in rows for _ in range(group_size)], dtype=torch.float32, device=device)
-    embeds = build_inputs_embeds(model, input_ids, z_L, z_H, inj_L, inj_H, *ids_meta)
+    embeds = build_inputs_embeds(model, input_ids, *_mask_streams(z_L, z_H, mask_stream), inj_L, inj_H, *ids_meta)
 
     model.set_adapter("av")
     out_ids = model.generate(
@@ -187,7 +199,7 @@ def _response_logprobs(model, adapter: str, embeds, attn, targets, S: int) -> to
 
 
 def policy_step(model, full_ids, full_attn, S, advantages, inj_L, inj_H, ids_meta, z_L, z_H, policy_optim,
-                 kl_beta: float, device):
+                 kl_beta: float, device, mask_stream: str | None = None):
     N = full_ids.shape[0]
     policy_optim.zero_grad()
     pg_total = kl_total = 0.0
@@ -195,7 +207,7 @@ def policy_step(model, full_ids, full_attn, S, advantages, inj_L, inj_H, ids_met
         sl = slice(start, start + _MICRO_BATCH)
         ids, attn = full_ids[sl], full_attn[sl]
         targets, resp_mask = ids[:, S:], attn[:, S:].float()
-        embeds = build_inputs_embeds(model, ids, z_L[sl], z_H[sl], inj_L, inj_H, *ids_meta)
+        embeds = build_inputs_embeds(model, ids, *_mask_streams(z_L[sl], z_H[sl], mask_stream), inj_L, inj_H, *ids_meta)
         with torch.no_grad():
             logp_ref = _response_logprobs(model, "av_ref", embeds, attn, targets, S)
         logp = _response_logprobs(model, "av", embeds, attn, targets, S)
@@ -240,6 +252,10 @@ def main() -> None:
     p.add_argument("--w-sum", type=float, default=1.0)
     p.add_argument("--w-comp", type=float, default=0.25)
     p.add_argument("--log-reward", action="store_true", help="reward = -log(loss) instead of -loss")
+    p.add_argument("--split-av", action="store_true",
+                   help="split AV (nla/hrm/split_av.py): each rollout pair is TWO calls, one with only z_L (z_H zeroed) "
+                        "writing the L field and one with only z_H writing the H field; the AV checkpoint must come from "
+                        "train_av_sft on split_av.py's parquet. Two policy updates per step; in-training eval/sanity skipped.")
     p.add_argument("--w-token", type=float, default=0.0,
                    help="verifiable reward: bonus for quoting the REAL marked token (see verifiable.py); 0 = off")
     p.add_argument("--w-ground", type=float, default=0.0,
@@ -287,7 +303,7 @@ def main() -> None:
     print(f"[train_rl] policy params: {sum(p.numel() for p in policy_params):,}  "
           f"ar params: {sum(p.numel() for p in ar_params):,}")
 
-    if args.sanity:
+    if args.sanity and not args.split_av:
         _run_sanity_check(model, tokenizer, rows[: args.batch_size], inj_l_char, inj_h_char, inj_L, inj_H,
                             ids_meta, heads, critic_template, weights, args.device, args.log_reward)
 
@@ -295,10 +311,23 @@ def main() -> None:
     with tqdm(total=args.steps) as pbar:
         while step < args.steps:
             batch_rows = [rows[i % len(rows)] for i in range(step * args.batch_size, (step + 1) * args.batch_size)]
-            full_ids, full_attn, S, texts, z_L, z_H = _generate_batch(
-                model, tokenizer, batch_rows, inj_l_char, inj_h_char, inj_L, inj_H, ids_meta, args.device,
-                args.group_size, args.max_new_tokens, args.temperature,
-            )
+            if args.split_av:
+                full_ids, full_attn, S, texts_L, z_L, z_H = _generate_batch(
+                    model, tokenizer, batch_rows, inj_l_char, inj_h_char, inj_L, inj_H, ids_meta, args.device,
+                    args.group_size, args.max_new_tokens, args.temperature, mask_stream="H",  # the L call
+                )
+                full_ids_B, full_attn_B, S_B, texts_H, _, _ = _generate_batch(
+                    model, tokenizer, batch_rows, inj_l_char, inj_h_char, inj_L, inj_H, ids_meta, args.device,
+                    args.group_size, args.max_new_tokens, args.temperature, mask_stream="L",  # the H call
+                )
+                texts = [join_split(a, b) for a, b in zip(texts_L, texts_H, strict=True)]
+                cjk_texts = texts_L + texts_H
+            else:
+                full_ids, full_attn, S, texts, z_L, z_H = _generate_batch(
+                    model, tokenizer, batch_rows, inj_l_char, inj_h_char, inj_L, inj_H, ids_meta, args.device,
+                    args.group_size, args.max_new_tokens, args.temperature,
+                )
+                cjk_texts = texts
             rewards, parsed, mses = compute_rewards(model, tokenizer, heads, critic_template, texts, z_L, z_H,
                                                 weights, args.device, args.log_reward)
             fve = fve_from_mses(mses, baseline)
@@ -315,13 +344,20 @@ def main() -> None:
             mean, std = rewards_t.mean(dim=1, keepdim=True), rewards_t.std(dim=1, keepdim=True).clamp_min(1e-4)
             advantages = ((rewards_t - mean) / std).view(-1)
 
-            pg_loss, kl_loss = policy_step(model, full_ids, full_attn, S, advantages, inj_L, inj_H, ids_meta,
-                                             z_L, z_H, policy_optim, args.kl_beta, args.device)
+            if args.split_av:
+                pg_a, kl_a = policy_step(model, full_ids, full_attn, S, advantages, inj_L, inj_H, ids_meta,
+                                           z_L, z_H, policy_optim, args.kl_beta, args.device, mask_stream="H")
+                pg_b, kl_b = policy_step(model, full_ids_B, full_attn_B, S_B, advantages, inj_L, inj_H, ids_meta,
+                                           z_L, z_H, policy_optim, args.kl_beta, args.device, mask_stream="L")
+                pg_loss, kl_loss = (pg_a + pg_b) / 2, (kl_a + kl_b) / 2
+            else:
+                pg_loss, kl_loss = policy_step(model, full_ids, full_attn, S, advantages, inj_L, inj_H, ids_meta,
+                                                 z_L, z_H, policy_optim, args.kl_beta, args.device)
             ar_loss = ar_update_step(model, tokenizer, heads, ar_optim, critic_template, parsed, z_L, z_H,
                                        weights, args.device)
 
             n_malformed = sum(p is None for p in parsed)
-            n_cjk_leak = sum(bool(_CJK_RE.search(t)) for t in texts)
+            n_cjk_leak = sum(bool(_CJK_RE.search(t)) for t in cjk_texts)
             step += 1
             pbar.update(1)
             pbar.set_postfix(reward=f"{sum(rewards)/len(rewards):.3f}", pg=f"{pg_loss:.3f}", kl=f"{kl_loss:.4f}")
@@ -337,13 +373,13 @@ def main() -> None:
             if step % 5 == 0 or step == 1:
                 print(f"step={step} mean_reward={sum(rewards)/len(rewards):.4f} pg_loss={pg_loss:.4f} "
                       f"kl={kl_loss:.5f} ar_loss={ar_loss.total.item() if ar_loss else float('nan'):.4f} "
-                      f"malformed={n_malformed}/{len(texts)} cjk_leak={n_cjk_leak}/{len(texts)}"
+                      f"malformed={n_malformed}/{len(texts)} cjk_leak={n_cjk_leak}/{len(cjk_texts)}"
                       + "".join(f" {k}={v:.3f}" for k, v in {**fve, **verif}.items()))
                 if n_cjk_leak > 0:
                     print(f"  WARNING: {n_cjk_leak} completions contain CJK chars — possible injection failure "
                           f"(the marker char leaking into generated text means it wasn't found/overwritten).")
 
-            if step % args.eval_every == 0 and args.eval_parquet:
+            if step % args.eval_every == 0 and args.eval_parquet and not args.split_av:
                 _run_eval(model, tokenizer, args.eval_parquet, inj_l_char, inj_h_char, inj_L, inj_H, ids_meta,
                             heads, critic_template, weights, args.device, args.log_reward, args.max_new_tokens)
             if step % args.save_every == 0 or step == args.steps:
