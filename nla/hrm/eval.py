@@ -44,8 +44,14 @@ _D_MIMIR = 1536
 @torch.no_grad()
 def generate_and_reconstruct(model, tokenizer, rows, inj_l_char, inj_h_char, inj_L, inj_H, heads, ids_meta,
                                critic_template, device, max_new_tokens=300, batch_size=16, shuffle_vectors=False, within_dataset=False,
-                               swap_streams=False):
+                               swap_streams=False, best_of=1, sample_temperature=1.0, weights=None):
     from nla.hrm.model import build_inputs_embeds
+
+    # Best-of-N: candidate 0 is the greedy completion, candidates 1..N-1 are temperature samples of the same prompt; the
+    # one whose AR reconstruction is closest to the row's GOLD vectors (recon loss) is kept. Uses the true vector, so the
+    # selected FVE is optimistic (selection on the metric); token accuracy and text checks are independent of it.
+    assert best_of == 1 or (weights is not None and not swap_streams and not shuffle_vectors), (
+        "best-of-N needs recon weights and is not combined with the shuffle / swap controls")
 
     # Swap control: each stream keeps its own adapter but is written into the OTHER stream's slot (z_L's adapted vector at
     # the [H] marker, z_H's at the [L] marker) by swapping the marker ids. If the L/H text difference follows the slot the
@@ -87,34 +93,72 @@ def generate_and_reconstruct(model, tokenizer, rows, inj_l_char, inj_h_char, inj
         model.set_adapter("av")
         gen_ids = model.generate(inputs_embeds=embeds, attention_mask=attn, max_new_tokens=max_new_tokens,
                                    do_sample=False, pad_token_id=tokenizer.pad_token_id)
-        texts = tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
+        cand_texts = [tokenizer.batch_decode(gen_ids, skip_special_tokens=True)]
+        for _ in range(best_of - 1):
+            sampled = model.generate(inputs_embeds=embeds, attention_mask=attn, max_new_tokens=max_new_tokens,
+                                       do_sample=True, temperature=sample_temperature, top_p=1.0, top_k=0,
+                                       pad_token_id=tokenizer.pad_token_id)
+            cand_texts.append(tokenizer.batch_decode(sampled, skip_special_tokens=True))
 
-        parsed = [parse_fields(t) for t in texts]
-        ok_idx = [i for i, p in enumerate(parsed) if p is not None]
-        zL_hat = [None] * len(batch_rows)
-        zH_hat = [None] * len(batch_rows)
-        if ok_idx:
-            model.set_adapter("ar")
-            l_texts = [critic_template.format(explanation=parsed[i][0]) for i in ok_idx]
-            h_texts = [critic_template.format(explanation=parsed[i][1]) for i in ok_idx]
-            c_enc = tokenizer(l_texts + h_texts, return_tensors="pt", padding=True,
-                                add_special_tokens=False, truncation=True, max_length=512)
-            c_ids, c_attn = c_enc["input_ids"].to(device), c_enc["attention_mask"].to(device)
-            c_out = model(input_ids=c_ids, attention_mask=c_attn, output_hidden_states=True, logits_to_keep=1)
-            lengths = c_attn.sum(dim=1) - 1
-            h_last = c_out.hidden_states[-1][torch.arange(c_ids.shape[0]), lengths]
-            n = len(ok_idx)
-            zL_pred, zH_pred = heads.forward_L(h_last[:n]), heads.forward_H(h_last[n:])
-            for j, i in enumerate(ok_idx):
-                zL_hat[i] = zL_pred[j].float().cpu()  # CPU: gold vectors live on CPU, avoids device mixing
-                zH_hat[i] = zH_pred[j].float().cpu()
+        def _reconstruct(texts):
+            parsed = [parse_fields(t) for t in texts]
+            ok_idx = [i for i, p in enumerate(parsed) if p is not None]
+            zL_hat = [None] * len(batch_rows)
+            zH_hat = [None] * len(batch_rows)
+            if ok_idx:
+                model.set_adapter("ar")
+                l_texts = [critic_template.format(explanation=parsed[i][0]) for i in ok_idx]
+                h_texts = [critic_template.format(explanation=parsed[i][1]) for i in ok_idx]
+                c_enc = tokenizer(l_texts + h_texts, return_tensors="pt", padding=True,
+                                    add_special_tokens=False, truncation=True, max_length=512)
+                c_ids, c_attn = c_enc["input_ids"].to(device), c_enc["attention_mask"].to(device)
+                c_out = model(input_ids=c_ids, attention_mask=c_attn, output_hidden_states=True, logits_to_keep=1)
+                lengths = c_attn.sum(dim=1) - 1
+                h_last = c_out.hidden_states[-1][torch.arange(c_ids.shape[0]), lengths]
+                n = len(ok_idx)
+                zL_pred, zH_pred = heads.forward_L(h_last[:n]), heads.forward_H(h_last[n:])
+                for j, i in enumerate(ok_idx):
+                    zL_hat[i] = zL_pred[j].float().cpu()  # CPU: gold vectors live on CPU, avoids device mixing
+                    zH_hat[i] = zH_pred[j].float().cpu()
+            return parsed, zL_hat, zH_hat
 
+        cands = [(texts, *_reconstruct(texts)) for texts in cand_texts]
         for i, r in enumerate(batch_rows):
+            chosen, bo = 0, None
+            if best_of > 1:
+                gold_L, gold_H = torch.tensor(r["z_L"]).unsqueeze(0), torch.tensor(r["z_H"]).unsqueeze(0)
+                losses = [None if c[1][i] is None else
+                          recon_loss(c[2][i].unsqueeze(0), c[3][i].unsqueeze(0), gold_L, gold_H, weights).total.item()
+                          for c in cands]
+                valid = [k for k, v in enumerate(losses) if v is not None]
+                chosen = min(valid, key=lambda k: losses[k]) if valid else 0
+                bo = {"chosen": chosen, "losses": losses,
+                      "quote_ok": [quote_match(c[1][i], r.get("context_marked")) for c in cands]}
+            texts_c, parsed_c, zl_c, zh_c = cands[chosen]
             out.append({
-                "row": r, "text": texts[i], "parsed": parsed[i],
-                "z_L_hat": zL_hat[i], "z_H_hat": zH_hat[i],
+                "row": r, "text": texts_c[i], "parsed": parsed_c[i],
+                "z_L_hat": zl_c[i], "z_H_hat": zh_c[i], **({"bo": bo} if bo else {}),
             })
     return out
+
+
+def best_of_report(name: str, results: list[dict]) -> None:
+    """Token accuracy (non-last rows) of the greedy candidate, the selected one, a random candidate and the oracle, plus the
+    mean reconstruction loss of greedy vs selected: does reconstruction consistency pick the right explanation?"""
+    rows = [r for r in results if r.get("bo") and not r["row"].get("is_last_prompt_pos")]
+    if not rows:
+        return
+    n_c = len(rows[0]["bo"]["quote_ok"])
+    ok = lambda v: v is True  # noqa: E731
+    greedy = sum(ok(r["bo"]["quote_ok"][0]) for r in rows) / len(rows)
+    chosen = sum(ok(r["bo"]["quote_ok"][r["bo"]["chosen"]]) for r in rows) / len(rows)
+    rand = sum(sum(ok(v) for v in r["bo"]["quote_ok"]) / n_c for r in rows) / len(rows)
+    oracle = sum(any(ok(v) for v in r["bo"]["quote_ok"]) for r in rows) / len(rows)
+    lg = [r["bo"]["losses"][0] for r in rows if r["bo"]["losses"][0] is not None]
+    lc = [r["bo"]["losses"][r["bo"]["chosen"]] for r in rows if r["bo"]["losses"][r["bo"]["chosen"]] is not None]
+    print(f"[{name}] best-of-{n_c}, non-last n={len(rows)}: marked token correct: greedy {greedy:.0%}, selected {chosen:.0%}, "
+          f"random candidate {rand:.0%}, oracle (any) {oracle:.0%}; mean recon loss greedy {sum(lg) / len(lg):.3e} -> "
+          f"selected {sum(lc) / len(lc):.3e}")
 
 
 def _dump_samples(path: str, split: str, results: list[dict], weights: ReconWeights, mean_mse: dict | None) -> None:
@@ -128,6 +172,8 @@ def _dump_samples(path: str, split: str, results: list[dict], weights: ReconWeig
                    "H_field": r["parsed"][1] if r["parsed"] else None,
                    "marked_token_quote_correct": quote_match(r["parsed"], row.get("context_marked")),
                    "grounding": grounding(r["parsed"], row.get("context_marked"))}
+            if r.get("bo"):
+                rec["bo"] = r["bo"]
             if r["parsed"] is not None:
                 z_L = torch.tensor(row["z_L"]).unsqueeze(0)
                 z_H = torch.tensor(row["z_H"]).unsqueeze(0)
@@ -325,6 +371,11 @@ def main() -> None:
                    help="control: write z_L's (adapted) vector into the [H] slot and z_H's into the [L] slot; generations are "
                         "cached under a separate '_swap' name. Use with --dump-samples to see whether the L/H text follows "
                         "the slot or the vector")
+    p.add_argument("--best-of", type=int, default=1,
+                   help="sample N-1 extra explanations per row (greedy is candidate 0) and keep the one whose AR "
+                        "reconstruction is closest to the gold vectors; FVE is then selection-biased, token accuracy "
+                        "and text are not. Cached as <output>.gen_<split>_bo<N>.pt")
+    p.add_argument("--sample-temperature", type=float, default=1.0)
     p.add_argument("--run-judge", action="store_true")
     p.add_argument("--judge-shuffle", choices=["roll", "within-dataset"], default=None,
                    help="with --run-judge: ALSO run the judge with each row patched by ANOTHER row's reconstruction "
@@ -335,6 +386,8 @@ def main() -> None:
     args = p.parse_args()
 
     weights = ReconWeights(w_sum=args.w_sum, w_comp=args.w_comp)
+    if args.best_of > 1:
+        torch.manual_seed(0)  # reproducible candidate sampling
     mean_mse = json.load(open(args.norm_stats_json))["mean_mse"] if args.norm_stats_json else None
 
     verbalizer_model = args.verbalizer_model or DEFAULT_VERBALIZER
@@ -358,7 +411,7 @@ def main() -> None:
         assert tm is not None
         ids_meta = (tm.injection_token_id_L, tm.injection_left_neighbor_id_L, tm.injection_right_neighbor_id_L,
                     tm.injection_token_id_H, tm.injection_left_neighbor_id_H, tm.injection_right_neighbor_id_H)
-        gen_path = f"{args.output}.gen_{name}{('_shufds' if args.shuffle_within_dataset else '_shuf') if args.shuffle_vectors else ''}{'_swap' if args.swap_streams else ''}.pt"
+        gen_path = f"{args.output}.gen_{name}{('_shufds' if args.shuffle_within_dataset else '_shuf') if args.shuffle_vectors else ''}{'_swap' if args.swap_streams else ''}{f'_bo{args.best_of}' if args.best_of > 1 else ''}.pt"
         if args.reuse_generations and Path(gen_path).exists():
             saved = torch.load(gen_path)
             assert len(saved) == len(rows), f"{gen_path} has {len(saved)} rows, split now has {len(rows)}; drop --reuse-generations"
@@ -368,8 +421,9 @@ def main() -> None:
             results = generate_and_reconstruct(model, tokenizer, rows, tm.injection_char_L, tm.injection_char_H,
                                                  inj_L, inj_H, heads, ids_meta, meta.prompt_templates["critic"], args.device,
                                                  args.max_new_tokens, args.batch_size, args.shuffle_vectors, args.shuffle_within_dataset,
-                                                 args.swap_streams)
+                                                 args.swap_streams, args.best_of, args.sample_temperature, weights)
             torch.save([{k: v for k, v in r.items() if k != "row"} for r in results], gen_path)
+        best_of_report(name, results)
         all_results[name] = results
         if args.dump_samples:
             _dump_samples(args.dump_samples, name, results, weights, mean_mse)
