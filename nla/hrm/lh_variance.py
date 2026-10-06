@@ -17,24 +17,32 @@ import numpy as np
 import pyarrow.parquet as pq
 
 
-def ridge_r2(x_tr, y_tr, x_te, y_te, lam: float = 1.0) -> float:
+def ridge_r2(x_tr, y_tr, x_te, y_te, lam: float = 1.0, device: str = "cpu") -> float:
     """R^2 of a ridge regression y ~ x on held-out rows, relative to the train-mean predictor."""
-    return ridge_r2_multi(x_tr, {"y": y_tr}, x_te, {"y": y_te}, lam)["y"]
+    return ridge_r2_multi(x_tr, {"y": y_tr}, x_te, {"y": y_te}, lam, device)["y"]
 
 
-def ridge_r2_multi(x_tr, ys_tr: dict, x_te, ys_te: dict, lam: float = 1.0) -> dict:
-    """Same, for several targets sharing one design matrix: the Gram matrix is computed and factorised once."""
+def ridge_r2_multi(x_tr, ys_tr: dict, x_te, ys_te: dict, lam: float = 1.0, device: str = "cpu") -> dict:
+    """Same, for several targets sharing one design matrix: the Gram matrix is computed and factorised once.
+    Runs in torch on `device` (use cuda on the cluster; numpy's BLAS there can be very slow)."""
+    import torch
+
+    def t(a):
+        return torch.as_tensor(np.asarray(a), dtype=torch.float32, device=device)
+
+    x_tr, x_te = t(x_tr), t(x_te)
     mx = x_tr.mean(0)
-    xc = (x_tr - mx).astype(np.float32)
-    gram = (xc.T @ xc).astype(np.float64)
-    gram += lam * np.eye(gram.shape[0]) * len(xc) / gram.shape[0]
-    xte = (x_te - mx).astype(np.float32)
+    xc = x_tr - mx
+    gram = (xc.T @ xc).double()
+    gram += lam * torch.eye(gram.shape[0], dtype=gram.dtype, device=device) * len(xc) / gram.shape[0]
+    xte = x_te - mx
     out = {}
     for k, y_tr in ys_tr.items():
+        y_tr, y_te = t(y_tr), t(ys_te[k])
         my = y_tr.mean(0)
-        w = np.linalg.solve(gram, (xc.T @ (y_tr - my).astype(np.float32)).astype(np.float64)).astype(np.float32)
+        w = torch.linalg.solve(gram, (xc.T @ (y_tr - my)).double()).float()
         pred = xte @ w + my
-        out[k] = float(1.0 - ((ys_te[k] - pred) ** 2).sum() / ((ys_te[k] - my) ** 2).sum())
+        out[k] = float(1.0 - ((y_te - pred) ** 2).sum() / ((y_te - my) ** 2).sum())
     return out
 
 
@@ -48,6 +56,7 @@ def main() -> None:
     p.add_argument("--base", required=True)
     p.add_argument("--limit", type=int, default=20000)
     p.add_argument("--lam", type=float, default=1.0, help="ridge strength (relative)")
+    p.add_argument("--device", default="cuda" if __import__("torch").cuda.is_available() else "cpu")
     args = p.parse_args()
 
     t = pq.read_table(args.base, columns=["z_L", "z_H", "doc_id", "dataset"]).slice(0, args.limit)
@@ -59,11 +68,12 @@ def main() -> None:
     s = zl + zh
     test = np.array([int(hashlib.sha256(str(d).encode()).hexdigest(), 16) % 5 == 0 for d in doc])  # document-level split
     tr, te = ~test, test
+    print(f"device {args.device}")
     print(f"{n} rows ({tr.sum()} train / {te.sum()} test, split by document)")
     cos = (zl * zh).sum(-1) / (np.linalg.norm(zl, axis=1) * np.linalg.norm(zh, axis=1))
     print(f"mean cos(z_L, z_H) = {cos.mean():.3f}; |s|^2 share of (|z_L|^2+|z_H|^2) = {(s**2).sum() / ((zl**2).sum() + (zh**2).sum()):.3f}")
     for xname, x, targets in (("z_H", zh, {"z_L": zl, "sum": s}), ("z_L", zl, {"z_H": zh, "sum": s})):
-        r2 = ridge_r2_multi(x[tr], {k: v[tr] for k, v in targets.items()}, x[te], {k: v[te] for k, v in targets.items()}, args.lam)
+        r2 = ridge_r2_multi(x[tr], {k: v[tr] for k, v in targets.items()}, x[te], {k: v[te] for k, v in targets.items()}, args.lam, args.device)
         for k, v in r2.items():
             print(f"  R^2 {k} from {xname}: {v:.3f}", flush=True)
     by = collections.defaultdict(list)
@@ -73,7 +83,7 @@ def main() -> None:
         idx = np.array(idx)
         a, b = idx[tr[idx]], idx[te[idx]]
         if len(a) > 200 and len(b) > 50:
-            print(f"  {d}: R^2 z_L from z_H {ridge_r2(zh[a], zl[a], zh[b], zl[b], args.lam):.3f}  "
+            print(f"  {d}: R^2 z_L from z_H {ridge_r2(zh[a], zl[a], zh[b], zl[b], args.lam, args.device):.3f}  "
                   f"(n train {len(a)}, test {len(b)})")
 
 
