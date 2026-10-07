@@ -255,6 +255,22 @@ Reference points: chance for always guessing a frequent non-last token is about 
   - Decision: format and FVE are sane (not broken), so proceed to RL (command in the planned-commands entry above); expect FVE to recover with AR co-adaptation as in E5/E7.
 - **RL launch log (user paste 2026-10-06, steps 1 to 52 of 500; `train_rl --split-av`, command as in the planned-commands entry):** about 52 s for step 1, then 41 to 46 s/step (ETA about 5.3 h); malformed 0/128 at every printed step (the pair join works); CJK hits 0 to 3 of 256 completions (the two calls count separately; as in the joint runs); KL 0.0007 at step 1 rising to about 0.01 at step 50 (small, comparable to E7's early steps); `ar_loss` about 1e-4; single-batch FVE sum / L / H: step 1 -0.033 / 0.053 / -0.526, step 5 0.172 / 0.124 / 0.211, step 20 0.319 / 0.172 / 0.555, step 30 0.424 / 0.332 / 0.536, step 50 0.421 / 0.402 / 0.441 (noisy: one batch of 16 prompts; E7 training blocks were about 0.3 to 0.4 sum). So the AR needed few steps to adapt to the split texts. Block means and held-out evals (`eval --split-av` on `step_100`, `step_300`, `final`, plus the judge) pending.
 - **RL progress, steps 100 to 155 (user paste 2026-10-07):** 12 printed steps, malformed 0/128 throughout, CJK 0 to 2 of 256, KL 0.014 to 0.019 (slowly rising, still small), 41 to 46 s/step (ETA about 4 h from step 155). Mean of the printed single-batch training FVE over these 12 prints: sum 0.358, L 0.331, H 0.304 (range sum 0.22 to 0.50; H has single-batch dips to -0.20 and 0.02). For orientation E7's 50-step training blocks of the sum FVE were 0.28 to 0.40: not clearly different; training FVE is not held-out, so only the evals decide.
+- **RL finished, 50-step block means of the training-rollout FVE (user paste 2026-10-07; recovered from tmux scrollback, 500 steps; single batches at temperature 1 on training prompts, not held-out):**
+
+| steps | fve_sum | L | H | kl | malformed (of 128) |
+|---|---|---|---|---|---|
+| 1-50 | 0.229 | 0.215 | 0.161 | 0.0060 | 0.0 |
+| 51-100 | 0.353 | 0.393 | 0.129 | 0.0139 | 0.0 |
+| 101-150 | 0.339 | 0.314 | 0.271 | 0.0166 | 0.0 |
+| 151-200 | 0.375 | 0.323 | 0.385 | 0.0204 | 0.1 |
+| 201-250 | 0.332 | 0.322 | 0.258 | 0.0226 | 0.1 |
+| 251-300 | 0.303 | 0.238 | 0.343 | 0.0219 | 0.1 |
+| 301-350 | 0.302 | 0.225 | 0.402 | 0.0219 | 0.0 |
+| 351-400 | 0.289 | 0.185 | 0.416 | 0.0250 | 0.0 |
+| 401-450 | 0.328 | 0.243 | 0.431 | 0.0276 | 0.0 |
+| 451-500 | 0.286 | 0.182 | 0.422 | 0.0291 | 0.1 |
+
+  Reading: the sum FVE rises to about 0.35 to 0.38 around steps 50 to 200 and then drifts down to about 0.29 (E7's training blocks sat at 0.28 to 0.40, about 0.325 on average: no clear difference); the two streams move in opposite directions: L peaks at 0.39 in steps 51 to 100 and falls to 0.18, H rises steadily from 0.13 to 0.43. KL grows slowly (0.006 to 0.029), malformed stays near 0. Why L degrades while H improves is not known (candidates: the reward lets H gain more from reading the token, KL drift of the L call, noise); held-out evals decide whether any of this is real. `step_100` and `step_200` are saved (every 100 steps) and may be better than `final` for L.
 - **Results (RL and evaluation):** TODO.
 
 # Bootstrap intervals and plotting tools (2026-10-07)
