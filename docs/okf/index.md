@@ -22,6 +22,7 @@ okf_version: "0.1"
 
 # Plans
 * [Data collection v2](/plans/data-collection-v2.md) - proposed changes to extraction, sampling and mix (not implemented)
+* [Last night before the talk](/plans/last-night-replication.md) - replicate the split pipeline, two cheap diagnostics, commands and decision rules
 
 # Observations
 * [Cancellation of L and H](/observations/cancellation.md) - cos about -0.8 on a small sample
