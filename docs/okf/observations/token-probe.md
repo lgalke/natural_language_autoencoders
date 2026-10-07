@@ -48,3 +48,16 @@ Reading:
 - The sum is worse than z_H alone (0.947 vs 0.989): z_L adds noise for token identity; the concat (0.973) does not beat z_H either.
 - Consequence for the verbalizer: the split verbalizer reaches 40 to 47% (H call) and 5 to 14% (L call) of a probe ceiling of 0.99 and 0.74; previous and next token are linearly readable at 0.76 / 0.73 (z_H) and 0.61 / 0.58 (z_L), so facts about the neighbours are a feasible verbalizer target.
 - Open: tokens are only one thing a stream can hold; the split verbalizer's genre-keyword rates were higher for the L call than for the H call. Probes for source identity and position (`--target dataset`, `--target relpos`, added in the next commit) test whether z_L holds coarse context that z_H does not.
+
+## Learning curve at the extraction position (user paste 2026-10-07; `--non-last --offsets 0 --train-sizes 500 2000 8000 --mlp-hidden 512`, same 3224 test rows, top-200 tokens)
+
+| train rows | z_L linear / MLP | z_H linear / MLP | sum | concat |
+|---|---|---|---|---|
+| 500 | 0.336 / 0.323 | 0.822 / 0.820 | 0.591 | 0.729 |
+| 2000 | 0.486 / 0.478 | 0.956 / 0.955 | 0.816 | 0.900 |
+| 8000 | 0.680 / 0.681 | 0.986 / 0.986 | 0.930 | 0.966 |
+| 12929 (all) | 0.739 / 0.744 | 0.989 / 0.988 | 0.947 | 0.973 |
+
+- **z_H saturates at about 2000 to 8000 rows; z_L is still climbing at 13k rows** by roughly +0.17 to +0.19 per 4x more data (0.486 to 0.680 for 2000 to 8000; +0.059 for the last 1.6x). So the L deficit is mostly SAMPLE EFFICIENCY, not missing information: the token is in z_L, but a probe needs far more examples to read it (at 500 rows the gap is 0.49, at 2000 0.47, at 8000 0.31, at all rows 0.25). A rough extrapolation, only if the log-linear trend continued (a guess), would put z_L at 0.9 around 40k rows and at the z_H level around 90k.
+- The MLP never helps (all rows: 0.744), so the difficulty is not nonlinearity either.
+- **For the verbalizer:** the split SFT gives each call about 9k examples; z_L is in the data-hungry regime there, which fits the L call's weak token reading (5 to 14% vs probe 0.74), though the verbalizer is far below the probe even for the H call, so extraction through the adapter and LoRA costs a lot on top. Larger or more varied data (the v2 plan) is the lever that should help z_L most.
