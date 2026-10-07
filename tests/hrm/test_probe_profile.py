@@ -46,3 +46,29 @@ def test_probe_recovers_the_planted_stream_and_offset(tmp_path):
             xt = torch.tensor(x)
             acc[name] = _fit_eval(xt[tr], y[tr], xt[te], y[te], 5, "cpu", steps=200)
         assert acc[good] > 0.95 and acc[bad] < 0.5, (offset, acc)
+
+
+def test_dataset_and_relpos_targets(tmp_path):
+    import torch
+
+    from nla.hrm.probe_check import _load_meta
+
+    rng = np.random.default_rng(1)
+    n = 600
+    ds = rng.integers(0, 3, size=n)
+    z_L = np.eye(3)[ds] @ rng.normal(size=(3, 16)) + 0.05 * rng.normal(size=(n, 16))   # z_L encodes the source
+    z_H = rng.normal(size=(n, 16))
+    ids = [list(range(20)) for _ in range(n)]
+    pos = [int(p) for p in rng.integers(1, 19, size=n)]
+    t = pa.table({"z_L": [r.tolist() for r in z_L], "z_H": [r.tolist() for r in z_H], "prompt_ids": ids, "position": pos,
+                  "world": [f"w{i}" for i in range(n)], "dataset": [f"d{k}" for k in ds], "is_last_prompt_pos": [False] * n})
+    path = str(tmp_path / "b.parquet")
+    pq.write_table(t, path)
+    zl, zh, y, _ = _load_meta(path, 10**6, "dataset", True)
+    assert sorted(set(y.tolist())) == [0, 1, 2]
+    _, _, rp, _ = _load_meta(path, 10**6, "relpos", True)
+    assert rp.min() >= 0 and rp.max() <= 4
+    yt, cut = torch.tensor(y), int(0.8 * len(y))
+    accs = {nm: _fit_eval(torch.tensor(x)[:cut], yt[:cut], torch.tensor(x)[cut:], yt[cut:], 3, "cpu", steps=200)
+            for nm, x in (("z_L", zl), ("z_H", zh))}
+    assert accs["z_L"] > 0.95 and accs["z_H"] < 0.6

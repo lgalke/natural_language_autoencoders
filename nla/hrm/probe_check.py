@@ -3,6 +3,8 @@
     python -m nla.hrm.probe_check --base base.parquet [--top-k 200]
     python -m nla.hrm.probe_check --base base.parquet --non-last --offsets -3 -2 -1 0 1 2 --mlp-hidden 512
     python -m nla.hrm.probe_check --base base.parquet --non-last --train-sizes 500 2000 8000 --mlp-hidden 512
+    python -m nla.hrm.probe_check --base base.parquet --non-last --target dataset --mlp-hidden 512   # source identity
+    python -m nla.hrm.probe_check --base base.parquet --non-last --target relpos --mlp-hidden 512    # position in the prompt (5 bins)
 
 Profile mode (is H "easier to decode" than L, and for WHICH information?):
   --offsets K...      probe the token at position + K (K=0 is the extraction position; negative = earlier tokens, positive =
@@ -49,6 +51,25 @@ def _load(base: str, max_rows: int, offset: int = 0, non_last: bool = False):
     return zl[ok], zh[ok], tok, [world[i] for i in ok]
 
 
+def _load_meta(base: str, max_rows: int, target: str, non_last: bool):
+    """Non-token targets: 'dataset' (source identity) or 'relpos' (position / prompt length, 5 equal bins)."""
+    cols = ["z_L", "z_H", "prompt_ids", "position", "world", "dataset"] + (["is_last_prompt_pos"] if non_last else [])
+    t = pq.read_table(base, columns=cols).slice(0, max_rows)
+    n = t.num_rows
+    zl = t.column("z_L").combine_chunks().flatten().to_numpy(zero_copy_only=False).astype(np.float32).reshape(n, -1)
+    zh = t.column("z_H").combine_chunks().flatten().to_numpy(zero_copy_only=False).astype(np.float32).reshape(n, -1)
+    ids, pos = t.column("prompt_ids").to_pylist(), t.column("position").to_pylist()
+    world, ds = t.column("world").to_pylist(), t.column("dataset").to_pylist()
+    last = t.column("is_last_prompt_pos").to_pylist() if non_last else [False] * n
+    ok = [i for i in range(n) if not last[i]]
+    if target == "dataset":
+        names = sorted(set(ds))
+        y = np.array([names.index(ds[i]) for i in ok])
+    else:
+        y = np.array([min(int(5 * pos[i] / len(ids[i])), 4) for i in ok])
+    return zl[ok], zh[ok], y, [world[i] for i in ok]
+
+
 def _fit_eval(x_tr, y_tr, x_te, y_te, n_cls, device, steps=300, wd=1e-3, hidden: int = 0) -> float:
     mu, sd = x_tr.mean(0, keepdim=True), x_tr.std(0, keepdim=True) + 1e-6
     x_tr, x_te = (x_tr - mu) / sd, (x_te - mu) / sd
@@ -83,18 +104,30 @@ def main() -> None:
     p.add_argument("--mlp-hidden", type=int, default=0, help="also fit a one-hidden-layer MLP probe with this width")
     p.add_argument("--train-sizes", type=int, nargs="+", default=None, help="learning curve: train-set sizes")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--target", choices=["token", "dataset", "relpos"], default="token",
+                   help="token: identity of the token at position + offset; dataset: source identity; relpos: 5 position bins")
     args = p.parse_args()
 
-    for offset in args.offsets:
-        zl, zh, tok, world = _load(args.base, args.max_rows, offset, args.non_last)
-        top = [t for t, _ in Counter(tok.tolist()).most_common(args.top_k)]
-        keep = np.isin(tok, top)
-        remap = {t: i for i, t in enumerate(top)}
-        y = np.array([remap[t] for t in tok[keep]])
+    for offset in args.offsets if args.target == "token" else [0]:
+        if args.target == "token":
+            zl, zh, tok, world = _load(args.base, args.max_rows, offset, args.non_last)
+            top = [t for t, _ in Counter(tok.tolist()).most_common(args.top_k)]
+            keep = np.isin(tok, top)
+            remap = {t: i for i, t in enumerate(top)}
+            y = np.array([remap[t] for t in tok[keep]])
+            cover = f"top-{len(top)} tokens cover {keep.mean():.0%} of rows"
+        else:
+            zl, zh, y_all, world = _load_meta(args.base, args.max_rows, args.target, args.non_last)
+            top = sorted(set(y_all.tolist()))
+            remap = {t: i for i, t in enumerate(top)}
+            y = np.array([remap[t] for t in y_all])
+            keep = np.ones(len(y), dtype=bool)
+            cover = f"{len(top)} classes ({args.target})"
         is_test = np.array([int(hashlib.sha256(w.encode()).hexdigest(), 16) % 5 == 0 for w in np.array(world)[keep]])
         zl, zh = zl[keep], zh[keep]
-        print(f"\n[offset {offset:+d}{', non-last' if args.non_last else ''}] rows={len(y)} (top-{len(top)} tokens cover "
-              f"{keep.mean():.0%} of rows), train={int((~is_test).sum())} test={int(is_test.sum())}")
+        label = f"offset {offset:+d}" if args.target == "token" else f"target {args.target}"
+        print(f"\n[{label}{', non-last' if args.non_last else ''}] rows={len(y)} ({cover}), "
+              f"train={int((~is_test).sum())} test={int(is_test.sum())}")
         assert is_test.any() and (~is_test).any(), "need rows in both train and test (more worlds)"
         maj = Counter(y[~is_test].tolist()).most_common(1)[0][0]
         print(f"majority-class baseline accuracy: {(y[is_test] == maj).mean():.3f}   (chance {1 / len(top):.3f})")
