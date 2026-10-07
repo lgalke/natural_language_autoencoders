@@ -78,3 +78,23 @@ The SFT replicate check compares per-field token accuracy with run 1 (above). Th
 # Without a GPU, during the night
 
 Slide outline and results page from the experiment log and the figures in `docs/okf/figures/`, with "say / do not say" notes; refresh the comparison figures once the dumps arrive.
+
+# Added: mini experiment on "H is easier to decode than L" (probe profile, no RL, minutes)
+
+Where the hypothesis stands: the probe reads the token at the extraction position from z_H at 0.991 and from z_L at 0.808; the split verbalizer reads it from z_H at 40 to 47% and from z_L at 5 to 14%; z_H is better predicted from z_L (R^2 0.34) than the reverse (0.22). Open: is it "z_H is a more linearly informative summary of everything", or "z_L encodes DIFFERENT things (for example other positions)", and is the L information absent or only nonlinearly encoded?
+
+`probe_check` now has a profile mode (tests in `tests/hrm/test_probe_profile.py`, planted-structure check on synthetic data):
+
+```bash
+# which information does each stream hold? token at position + K, K = -3 .. +3 (positive K = later tokens, visible to a bidirectional state)
+python -m nla.hrm.probe_check --base base.parquet --non-last --offsets -3 -2 -1 0 1 2 3 --mlp-hidden 512 2>&1 | tee probe_profile.txt
+# data hunger versus information gap: learning curve at the extraction position
+python -m nla.hrm.probe_check --base base.parquet --non-last --offsets 0 --train-sizes 500 2000 8000 --mlp-hidden 512 2>&1 | tee probe_curve.txt
+```
+
+How to read it (accuracies carry a 95% binomial interval; treat gaps below about 0.03 as ties):
+- z_H above z_L at every offset, same margin: z_H is simply the more linearly informative state.
+- z_L above z_H at some offsets (for example -1, -2): the streams hold different things (L local, H the current token and context); this is the interesting outcome.
+- The MLP closes the L gap at offset 0: the token is in z_L but nonlinearly encoded, so "harder to read" is about accessibility, which also explains why a small LoRA verbalizer with an affine adapter fails on it.
+- The learning curve: if z_L at 8000 rows approaches z_H, the gap is data hunger; if it stays flat, it is an information gap.
+- Caveats: top-200 classes per offset, no shuffled-label control (the majority baseline is printed), the last prompt position is dropped with `--non-last`.
