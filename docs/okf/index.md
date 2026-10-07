@@ -2,6 +2,9 @@
 okf_version: "0.1"
 ---
 
+# Headline (hypothesis, strong evidence, replication pending)
+* [H holds WHAT, L holds WHERE](/observations/h-what-l-where.md) - probes and the split verbalizer agree: z_H reads the token, z_L the position; each verbalizer call is at chance on the other call's fact
+
 # Overview
 * [HRM verbalizer](/overview.md) - goal, method in one paragraph, current status
 
@@ -25,6 +28,7 @@ okf_version: "0.1"
 * [Last night before the talk](/plans/last-night-replication.md) - replicate the split pipeline, two cheap diagnostics, commands and decision rules
 
 # Observations
+* [H what, L where (headline)](/observations/h-what-l-where.md) - the division of labour between the streams, evidence and open checks
 * [Cancellation of L and H](/observations/cancellation.md) - cos about -0.8 on a small sample
 * [RL run 1](/observations/rl-run-1.md) - what the 200-step log does and does not show
 * [RL run 2 (log-reward)](/observations/rl-run-2-log-reward.md) - FVE positive, KL large, samples look unfaithful (preliminary)

@@ -6,7 +6,11 @@ tags: [status, todo]
 timestamp: 2026-09-30
 ---
 
-# Central question, unanswered so far
+# Update 2026-10-08: first answer, to be replicated
+
+The two streams store different things: z_H the token, z_L the position ([H what, L where](/observations/h-what-l-where.md)). Open: replication of the verbalizer-level dissociation (SFT replicate with `--facts position`, RL `ckpt/rl_split_pos`), intervals on the non-last numbers, a controlled position probe, other fact pairs.
+
+# Central question, unanswered so far (joint verbalizer)
 
 Do the L and H fields of the AV's explanations carry stream-specific content, and does RL produce it? Nothing in hand answers this yet.
 
