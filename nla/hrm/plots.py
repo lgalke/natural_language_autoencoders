@@ -5,6 +5,7 @@
                                     --models E7 E8 --reference --out figs/fve_iid.png
     python -m nla.hrm.plots bars    --results results.json --metrics tok_L tok_H --split iid --subset non-last \\
                                     --models E7 SplitSFT --out figs/token_fields.png
+    python -m nla.hrm.plots dissociation --results results.json --model E11 --split iid --subset non-last --out figs/dissoc.png
     python -m nla.hrm.plots judge   --results results.json --model E7 --out figs/judge.png
     python -m nla.hrm.plots curves  --log E8=rl_ver.log E9=rl_split.log --keys fve_sum kl --out figs/curves.png
     python -m nla.hrm.plots curves  --blocks E7=e7_blocks.txt --keys fve_sum --out figs/e7_blocks.png
@@ -105,6 +106,27 @@ def cmd_bars(a) -> None:
     ax.set_xticks(x, [LABELS.get(k, k) for k in metrics])
     title = a.title or f"{'FVE' if is_fve else 'Marked-token accuracy'}: {a.split}, {a.subset} rows (95% CI over rows)"
     _style(ax, "FVE (vs. mean predictor)" if is_fve else "share correct", title)
+    _legend(ax)
+    _save(fig, a.out)
+
+
+def cmd_dissociation(a) -> None:
+    """2 x 2: per-call accuracy on two facts (marked token, position fifth): L call vs H call, with chance levels."""
+    cell = json.load(open(a.results))["models"][a.model][a.split][a.subset]
+    groups = [("marked token", "tok", CHANCE_TOKEN), ("position (fifth of the prompt)", "pos", 0.20)]
+    fig, ax = plt.subplots(figsize=(7.4, 4.6))
+    width = 0.2
+    for gi, (_, key, chance) in enumerate(groups):
+        for ci, (call, color) in enumerate((("L", SERIES[0]), ("H", SERIES[1]))):
+            c = cell[f"{key}_{call}"]
+            x = gi + (ci - 0.5) * (width + 0.03)
+            ax.bar(x, c["est"], width=width, color=color, label=f"{call} call" if gi == 0 else None, zorder=3)
+            ax.errorbar(x, c["est"], yerr=[[c["est"] - c["lo"]], [c["hi"] - c["est"]]], fmt="none", ecolor=INK,
+                        elinewidth=1.2, capsize=0, zorder=4)
+        ax.hlines(chance, gi - 0.3, gi + 0.3, colors=NEUTRAL, linewidth=1.6, zorder=2,
+                  label="chance" if gi == 0 else None)
+    ax.set_xticks(range(len(groups)), [g[0] for g in groups])
+    _style(ax, "share correct", a.title or f"Per-call accuracy, {a.split}, {a.subset} rows ({a.model}; 95% CI over rows)")
     _legend(ax)
     _save(fig, a.out)
 
@@ -222,6 +244,14 @@ def main() -> None:
     b.add_argument("--title", default=None)
     b.add_argument("--out", required=True)
     b.set_defaults(fn=cmd_bars)
+    d = sub.add_parser("dissociation")
+    d.add_argument("--results", required=True)
+    d.add_argument("--model", required=True)
+    d.add_argument("--split", default="iid")
+    d.add_argument("--subset", default="non-last", choices=["all", "non-last"])
+    d.add_argument("--title", default=None)
+    d.add_argument("--out", required=True)
+    d.set_defaults(fn=cmd_dissociation)
     j = sub.add_parser("judge")
     j.add_argument("--results", required=True)
     j.add_argument("--model", required=True)
