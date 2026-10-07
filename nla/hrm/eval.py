@@ -203,6 +203,8 @@ def _dump_samples(path: str, split: str, results: list[dict], weights: ReconWeig
         for r in results:
             row = r["row"]
             rec = {"split": split, "dataset": row.get("dataset"), "position": row.get("position"),
+                   "prompt_len": row.get("prompt_len"),
+                   "pos_correct": list(position_match_fields(r["parsed"], row)),
                    "is_last_prompt_pos": row.get("is_last_prompt_pos"),
                    "context_marked": row.get("context_marked"), "completion": r["text"],
                    "L_field": r["parsed"][0] if r["parsed"] else None,
@@ -238,6 +240,21 @@ def shuffle_permutation(rows: list[dict], within_dataset: bool) -> list[int]:
         for a, b in zip(idxs, idxs[1:] + idxs[:1], strict=True):
             perm[a] = b
     return perm
+
+
+_POS_RE = re.compile(r"Position:\s*(\d)\s*of\s*5", re.I)
+
+
+def position_match_fields(fields: tuple[str, str] | None, row: dict) -> tuple[bool | None, bool | None]:
+    """Split-AV position fact: does each field's `Position: K of 5` equal the true fifth of the prompt? None = no fact."""
+    if fields is None or not row.get("prompt_len") or row.get("position") is None:
+        return None, None
+    true = min(int(5 * row["position"] / row["prompt_len"]), 4) + 1
+    out = []
+    for f in fields:
+        m = _POS_RE.search(f)
+        out.append(int(m.group(1)) == true if m else None)
+    return out[0], out[1]
 
 
 def marked_token(context_marked: str | None) -> str | None:
@@ -323,6 +340,9 @@ def summarize(results: list[dict], weights: ReconWeights, mean_mse: dict | None)
     geo = {"cos_s": [], "cos_L": [], "cos_H": [], "norm_ratio_s": []}
     quote = [quote_match(r["parsed"], r["row"].get("context_marked")) for r in ok]
     quoted = [q for q in quote if q is not None]
+    pos_fields = [position_match_fields(r["parsed"], r["row"]) for r in ok]
+    pL = [float(a) for a, _ in pos_fields if a is not None]
+    pH = [float(b) for _, b in pos_fields if b is not None]
     per_field = [quote_match_fields(r["parsed"], r["row"].get("context_marked")) for r in ok]
     qL = [float(a) for a, _ in per_field if a is not None]
     qH = [float(b) for _, b in per_field if b is not None]
@@ -362,6 +382,7 @@ def summarize(results: list[dict], weights: ReconWeights, mean_mse: dict | None)
         "l_field_words_mean": _mean(len_l), "h_field_words_mean": _mean(len_h),
         "quote_rate": len(quoted) / len(ok) if ok else float("nan"),  # share of explanations that quote a marked token
         "quote_match_rate": _mean([float(q) for q in quoted]),        # of those, share quoting the REAL token
+        "pos_match_rate_L": _mean(pL), "pos_match_rate_H": _mean(pH), "pos_rate": len(pL) / len(ok) if ok else float("nan"),
         "quote_match_rate_L": _mean(qL), "quote_match_rate_H": _mean(qH),  # per field, over fields that quote a token
         "quote_rate_L": len(qL) / len(ok) if ok else float("nan"), "quote_rate_H": len(qH) / len(ok) if ok else float("nan"),
         "grounded_quote_rate": q_ok / q_tot if q_tot else float("nan"),   # quoted spans found verbatim in the prompt
@@ -489,6 +510,9 @@ def main() -> None:
               f"correct token in {summary['quote_match_rate']:.0%} of those\n"
               f"      per field: L correct {summary['quote_match_rate_L']:.0%} (quoted {summary['quote_rate_L']:.0%}), "
               f"H correct {summary['quote_match_rate_H']:.0%} (quoted {summary['quote_rate_H']:.0%})\n"
+              + (f"      position fact (split AV, chance 20%): L {summary['pos_match_rate_L']:.0%}, "
+                 f"H {summary['pos_match_rate_H']:.0%} (stated in {summary['pos_rate']:.0%})\n"
+                 if summary["pos_rate"] > 0 else "") +
               f"      grounding in the prompt text: {summary['grounded_quote_rate']:.0%} of {summary['grounded_quote_spans']} quoted spans "
               f"verbatim in context; {summary['grounded_name_rate']:.0%} of {summary['grounded_name_words']} capitalised names in context "
               f"(low = confabulated details)")

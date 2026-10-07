@@ -94,7 +94,7 @@ def prefix_token_mask(tok, response: str, n_resp_ids: int) -> list[int]:
     """1 for response tokens (tokenizer ids of `response`, no special tokens) inside a `Marked token: "X".` span,
     by character-offset overlap, else 0. Used to weight/measure the token span (train_av_sft, nll_check)."""
     import re
-    spans = [m.span() for m in re.finditer(r'Marked token: "[^"]*"\.', response)]
+    spans = [m.span() for m in re.finditer(r'(?:Marked token: "[^"]*"|Position: \d of 5)\.', response)]
     offs = tok(response, add_special_tokens=False, return_offsets_mapping=True)["offset_mapping"]
     mask = [int(any(a < e and b > s0 for s0, e in spans)) for a, b in offs]
     assert len(mask) == n_resp_ids

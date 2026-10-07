@@ -109,3 +109,26 @@ def test_eval_split_path_masks_one_stream_per_call_and_scores_the_joined_pair(mo
     assert stream_tag("H") in tok.last_contents[0]  # the second prompt was tagged for the H stream
     assert all(r["parsed"] == ("mode=1", "mode=1") for r in res)
     assert torch.allclose(res[0]["z_L_hat"], torch.tensor([1.0, 0.0, 0.0, 0.0]))
+
+
+def test_position_fact_in_both_calls_and_mask_and_eval_parser():
+    from nla.hrm.build import prefix_token_mask
+    from nla.hrm.eval import position_match_fields
+
+    row = {"prompt": [{"role": "user", "content": "describe"}],
+           "response": wrap_lh_explanation('Marked token: "a". LL', 'Marked token: "b". HH'),
+           "z_L": [1.0, 2.0], "z_H": [3.0, 4.0], "position": 12, "prompt_len": 20}
+    out, _ = convert_rows([row], facts=True)
+    assert out[0]["response"] == single_response('Marked token: "a". Position: 4 of 5. LL', "L")
+    assert out[1]["response"] == single_response('Marked token: "b". Position: 4 of 5. HH', "H")
+    # the weight mask covers the token span and the position span
+    class Tok:
+        def __call__(self, text, add_special_tokens=False, return_offsets_mapping=True):
+            return {"offset_mapping": [(i, i + 1) for i in range(len(text))]}
+
+    resp = out[0]["response"]
+    mask = prefix_token_mask(Tok(), resp, len(resp))
+    spans = [m.span() for m in __import__("re").finditer(r'Marked token: "a"\.|Position: 4 of 5\.', resp)]
+    assert sum(mask) == sum(b - a for a, b in spans)
+    assert position_match_fields(('Position: 4 of 5. x', 'Position: 2 of 5. y'), row) == (True, False)
+    assert position_match_fields(('no fact', 'Position: 4 of 5.'), row) == (None, True)

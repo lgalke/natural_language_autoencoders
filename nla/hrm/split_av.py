@@ -17,6 +17,7 @@ to L and H) and writes a matching sidecar.
 """
 
 import argparse
+import re
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -46,8 +47,21 @@ def join_split(l_completion: str, h_completion: str) -> str:
     return wrap_lh_explanation(l_text, h_text) if l_text and h_text else ""
 
 
-def convert_rows(rows: list[dict]) -> tuple[list[dict], int]:
-    """AV-SFT rows (joint response) -> split rows (L call with z_H zeroed, H call with z_L zeroed)."""
+def position_bin(position: int, prompt_len: int) -> int:
+    """1..5: which fifth of the prompt the extraction position is in (same bins as `probe_check --target relpos`)."""
+    return min(int(5 * position / prompt_len), 4) + 1
+
+
+def add_position_fact(text: str, position: int, prompt_len: int) -> str:
+    """Insert `Position: K of 5. ` right after the `Marked token: "X". ` prefix (or at the start)."""
+    fact = f"Position: {position_bin(position, prompt_len)} of 5. "
+    m = re.match(r'(Marked token: "[^"]*"\. )', text)
+    return (m.group(1) + fact + text[m.end():]) if m else fact + text
+
+
+def convert_rows(rows: list[dict], facts: bool = False) -> tuple[list[dict], int]:
+    """AV-SFT rows (joint response) -> split rows (L call with z_H zeroed, H call with z_L zeroed).
+    facts=True also writes the programmatic `Position: K of 5.` fact into BOTH calls (needs position and prompt_len)."""
     out, bad = [], 0
     for r in rows:
         parsed = parse_fields(r["response"])
@@ -56,6 +70,8 @@ def convert_rows(rows: list[dict]) -> tuple[list[dict], int]:
             continue
         zeros = [0.0] * len(r["z_L"])
         for stream, text in (("L", parsed[0]), ("H", parsed[1])):
+            if facts:
+                text = add_position_fact(text, r["position"], r["prompt_len"])
             c = dict(r)
             p0 = dict(r["prompt"][0])
             p0["content"] = tag_content(p0["content"], stream)
@@ -73,13 +89,16 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--in", dest="inp", required=True, help="AV-SFT parquet from build.py (e.g. av_sft_tok.parquet)")
     p.add_argument("--out", required=True)
+    p.add_argument("--facts", choices=["position"], default=None,
+                   help="also write a programmatic fact into both calls: position = `Position: K of 5.` (needs the "
+                        "position and prompt_len columns); the loss-weight mask (--prefix-weight) covers it")
     args = p.parse_args()
     t = pq.read_table(args.inp)
-    rows, bad = convert_rows(t.to_pylist())
+    rows, bad = convert_rows(t.to_pylist(), facts=args.facts == "position")
     pq.write_table(pa.Table.from_pylist(rows, schema=t.schema), args.out)
     meta = read_sidecar(LocalStorage(), args.inp)
     meta.row_count = len(rows)
-    meta.build_options = {**(meta.build_options or {}), "split_av": True}
+    meta.build_options = {**(meta.build_options or {}), "split_av": True, **({"facts": args.facts} if args.facts else {})}
     meta.parent_datasets = [*meta.parent_datasets, args.inp]
     write_sidecar(LocalStorage(), args.out, meta)
     print(f"{t.num_rows} rows in, {len(rows)} rows out ({bad} malformed responses skipped) -> {args.out}")

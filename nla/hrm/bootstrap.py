@@ -21,7 +21,7 @@ import json
 
 import numpy as np
 
-METRICS_DUMP = ["fve_sum", "fve_L", "fve_H", "tok_first", "tok_L", "tok_H", "ground_span", "ground_name"]
+METRICS_DUMP = ["fve_sum", "fve_L", "fve_H", "tok_first", "tok_L", "tok_H", "pos_L", "pos_H", "ground_span", "ground_name"]
 SUBSETS = ("all", "non-last")
 
 
@@ -48,6 +48,9 @@ def row_arrays(rows: list[dict]) -> dict[str, tuple[np.ndarray, np.ndarray]]:
             for m, v in (("tok_L", a), ("tok_H", b)):
                 if v is not None:
                     out[m][0][i], out[m][1][i] = float(v is True), 1.0
+        for m, v in zip(("pos_L", "pos_H"), r.get("pos_correct") or (None, None), strict=True):
+            if v is not None:
+                out[m][0][i], out[m][1][i] = float(v is True), 1.0
         g = r.get("grounding")
         if g:
             out["ground_span"][0][i], out["ground_span"][1][i] = g["quoted_ok"], g["quoted_total"]
