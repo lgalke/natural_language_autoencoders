@@ -39,6 +39,10 @@ Sources: [token probe](/observations/token-probe.md), [experiments](/experiments
 
 Crude keyword rule (the source's genre word anywhere in the field), n=100 per split: E11 iid L call 0.78 vs H call 0.55 (paired +0.23 [+0.12, +0.34]), ood 0.77 vs 0.34 (+0.43 [+0.31, +0.55]); E12 and the earlier split SFT without facts (a separate SFT run) point the same way (details in [full examples](/paper/slide-examples-full.md)). The source probe is a tie at the ceiling, so this is extraction, not content. Suggests the refinement "L holds where and what kind of document; H holds the local token", to be tested with a real genre/classification probe.
 
+# Does RL carve the difference out? (E12, correlational)
+
+After RL the dissociation is unchanged (interaction +0.540 vs +0.598 after SFT). Row-level: the H stream's reconstruction is +0.76 [+0.63, +0.90] higher when the H call names the right token, the L stream's +0.13 [+0.02, +0.24] higher when the L call states the genre, neither tied to the other call's fact (details and caveats in [experiments](/experiments.md)). So the reward points the same way as the probes, but the calls did not become better at the facts under RL; RL mostly moved both calls toward stock texts. SFT with identical programmatic targets is therefore the controlled place to read the stream difference, RL the place where reward-driven shaping would have to show.
+
 # What would falsify or weaken it
 
 - (Replicate run 2026-10-09: the pattern is reproduced for the token on both splits and for the position on iid, not for the position on ood.)
