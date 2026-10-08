@@ -112,23 +112,37 @@ def cmd_bars(a) -> None:
 
 
 def cmd_dissociation(a) -> None:
-    """2 x 2: per-call accuracy on two facts (marked token, position fifth): L call vs H call, with chance levels."""
-    cell = json.load(open(a.results))["models"][a.model][a.split][a.subset]
+    """2 x 2: per-call accuracy on two facts (marked token, position fifth): L call vs H call, with chance levels.
+    With several --models (runs), the first is drawn solid and the others hatched (same colour = same call)."""
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
+
+    models = a.models or [a.model]
+    res = json.load(open(a.results))["models"]
     groups = [("marked token", "tok", CHANCE_TOKEN), ("position (fifth of the prompt)", "pos", 0.20)]
-    fig, ax = plt.subplots(figsize=(7.4, 4.6))
-    width = 0.2
+    fig, ax = plt.subplots(figsize=(7.8 if len(models) > 1 else 7.4, 4.8))
+    nb = 2 * len(models)
+    width = min(0.2, 0.62 / nb)
+    hatches = ["", "////", "xxxx"]
     for gi, (_, key, chance) in enumerate(groups):
-        for ci, (call, color) in enumerate((("L", SERIES[0]), ("H", SERIES[1]))):
-            c = cell[f"{key}_{call}"]
-            x = gi + (ci - 0.5) * (width + 0.03)
-            ax.bar(x, c["est"], width=width, color=color, label=f"{call} call" if gi == 0 else None, zorder=3)
-            ax.errorbar(x, c["est"], yerr=[[c["est"] - c["lo"]], [c["hi"] - c["est"]]], fmt="none", ecolor=INK,
-                        elinewidth=1.2, capsize=0, zorder=4)
-        ax.hlines(chance, gi - 0.3, gi + 0.3, colors=NEUTRAL, linewidth=1.6, zorder=2,
-                  label="chance" if gi == 0 else None)
+        for mi, model in enumerate(models):
+            cell = res[model][a.split][a.subset]
+            for ci, (call, color) in enumerate((("L", SERIES[0]), ("H", SERIES[1]))):
+                c = cell[f"{key}_{call}"]
+                x = gi + (mi * 2 + ci - (nb - 1) / 2) * (width + 0.015)
+                ax.bar(x, c["est"], width=width, color=color, hatch=hatches[mi], edgecolor=SURFACE, linewidth=0, zorder=3)
+                ax.errorbar(x, c["est"], yerr=[[c["est"] - c["lo"]], [c["hi"] - c["est"]]], fmt="none", ecolor=INK,
+                            elinewidth=1.2, capsize=0, zorder=4)
+        ax.hlines(chance, gi - 0.4, gi + 0.4, colors=NEUTRAL, linewidth=1.6, zorder=2)
     ax.set_xticks(range(len(groups)), [g[0] for g in groups])
-    _style(ax, "share correct", a.title or f"Per-call accuracy, {a.split}, {a.subset} rows ({a.model}; 95% CI over rows)")
-    _legend(ax)
+    ax.set_ylim(0, None)
+    _style(ax, "share correct", a.title or f"Per-call accuracy, {a.split}, {a.subset} rows (95% CI over rows)")
+    handles = [Patch(color=SERIES[0], label="L call"), Patch(color=SERIES[1], label="H call"),
+               Line2D([0], [0], color=NEUTRAL, linewidth=1.6, label="chance")]
+    if len(models) > 1:
+        handles += [Patch(facecolor="#bbbbb5", edgecolor=SURFACE, hatch=hatches[i], label=m) for i, m in enumerate(models)]
+    ax.legend(handles=handles, frameon=False, fontsize=10, loc="upper center", bbox_to_anchor=(0.5, -0.12),
+              ncol=len(handles), labelcolor=INK2)
     _save(fig, a.out)
 
 
@@ -305,7 +319,8 @@ def main() -> None:
     b.set_defaults(fn=cmd_bars)
     d = sub.add_parser("dissociation")
     d.add_argument("--results", required=True)
-    d.add_argument("--model", required=True)
+    d.add_argument("--model", default=None)
+    d.add_argument("--models", nargs="+", default=None, help="several runs: the first solid, the others hatched")
     d.add_argument("--split", default="iid")
     d.add_argument("--subset", default="non-last", choices=["all", "non-last"])
     d.add_argument("--title", default=None)

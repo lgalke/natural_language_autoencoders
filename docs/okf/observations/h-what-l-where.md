@@ -26,6 +26,8 @@ Sources: [token probe](/observations/token-probe.md), [experiments](/experiments
 
 # How strong it is
 
+- **Replicate (independent SFT run, 2026-10-09):** the token half replicates on both splits (H call minus L call +0.241 [+0.149, +0.345] iid, +0.193 [+0.102, +0.284] ood); the position half replicates on iid (L call minus H call +0.207 [+0.092, +0.333]) but NOT on ood (+0.034 [-0.068, +0.136], against +0.193 in the first run). Interaction +0.448 [+0.299, +0.609] iid, +0.227 [+0.080, +0.375] ood (first run +0.598, +0.386). In the replicate the L call is also above chance on the token on iid (0.195). Figure: `docs/okf/figures/dissociation_{iid,ood}_nonlast_E11_vs_replicate.png`. So: "H reads WHAT" is replicated; "L holds WHERE" is supported on iid by the probe (z_L 0.669 vs 0.607) and by two runs, and weaker on ood.
+
 - **After RL (E12, RL from the position-fact SFT, 500 steps):** the dissociation survives: interaction +0.540 [+0.379, +0.701] iid and +0.398 [+0.250, +0.545] ood (non-last, 87 / 88 rows). RL raised the L call's token reading on iid from 0.093 to 0.198 (still well below the H call's 0.419); the H call stays at chance on position. Figures: `docs/okf/figures/dissociation_{iid,ood}_nonlast_E12.png`. Same SFT run as E11, so this is not a replicate.
 
 - **E11 intervals (5000 row resamples, non-last):** the interaction (position L minus H) minus (token L minus H) is +0.598 [+0.437, +0.759] on iid and +0.386 [+0.239, +0.534] on ood; each contrast alone also excludes zero (token H minus L +0.333 [+0.230, +0.437] iid; position L minus H +0.264 [+0.138, +0.391] iid). Figures: `docs/okf/figures/dissociation_{iid,ood}_nonlast_E11.png`. These intervals cover which rows were drawn, not which SFT run: still one run.
@@ -39,7 +41,7 @@ Crude keyword rule (the source's genre word anywhere in the field), n=100 per sp
 
 # What would falsify or weaken it
 
-- The SFT replicate (with `--facts position`) does not reproduce the pattern.
+- (Replicate run 2026-10-09: the pattern is reproduced for the token on both splits and for the position on iid, not for the position on ood.)
 - A better-controlled position probe: relpos is confounded with prompt length and source (length distributions differ), no shuffled-label control, five bins only.
 - The pattern disappears with another fact pair (for example previous token for L, or absolute position).
 

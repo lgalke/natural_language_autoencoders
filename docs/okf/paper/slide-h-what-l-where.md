@@ -35,8 +35,10 @@ The L call sees only z_L, the H call only z_H; both are trained to write the sam
 | E11 ood | 0.045 [0.011, 0.091] | **0.239** [0.159, 0.330] | **0.341** [0.250, 0.443] | 0.148 [0.080, 0.227] | +0.386 [0.239, 0.534] |
 | E12 iid | 0.198 [0.116, 0.287] | **0.419** [0.314, 0.529] | **0.483** [0.379, 0.586] | 0.161 [0.092, 0.241] | +0.540 [0.379, 0.701] |
 | E12 ood | 0.034 [0.000, 0.080] | **0.284** [0.193, 0.375] | **0.364** [0.273, 0.466] | 0.216 [0.136, 0.307] | +0.398 [0.250, 0.545] |
+| replicate iid (independent SFT run) | 0.195 [0.115, 0.287] | **0.442** [0.337, 0.552] | **0.437** [0.333, 0.540] | 0.230 [0.149, 0.322] | +0.448 [0.299, 0.609] |
+| replicate ood | 0.091 [0.034, 0.148] | **0.284** [0.193, 0.375] | 0.295 [0.205, 0.398] | 0.261 [0.170, 0.352] | +0.227 [0.080, 0.375] |
 
-Interaction = (position L-call minus H-call) minus (token L-call minus H-call), paired over the same rows. Figures: `docs/okf/figures/dissociation_{iid,ood}_nonlast_{E11,E12}.png`. Caveats: one SFT run (the independent replicate has not been run; E12 is the same run after RL); intervals cover rows, not training runs; the rest of each explanation is invented prose (show only the fact line).
+Interaction = (position L-call minus H-call) minus (token L-call minus H-call), paired over the same rows. Figures: `docs/okf/figures/dissociation_{iid,ood}_nonlast_{E11,E12}.png`. Caveats: two independent SFT runs (E11 and the replicate; E12 is E11 after RL): the token half (H call better) replicates on both splits, the position half (L call better) on iid only (replicate ood position L minus H +0.034 [-0.068, +0.136]); say "replicated for the token, on iid for the position" on the slide; intervals cover rows, not training runs; the rest of each explanation is invented prose (show only the fact line).
 
 # Three examples (E11, iid, non-last)
 
