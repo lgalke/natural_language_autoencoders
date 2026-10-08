@@ -93,3 +93,33 @@ Source: `samples_split_sft_pos.jsonl` (E11, iid split, greedy decoding, split ve
 # A pattern across the three examples (and a measured version)
 
 In all three examples the L call gets the genre right and the H call gets it wrong. Measured over all rows with a crude keyword rule (the genre word of the source appears anywhere in the field: gsm `word problem|arithmetic|math`, da_instruct `danish|dansk`, SimpleStories and MuSR `narrative|story|fiction|fairy|fable|mystery`): E11 iid L call 0.78 vs H call 0.55 (paired L minus H +0.23 [+0.12, +0.34]), ood 0.77 vs 0.34 (+0.43 [+0.31, +0.55]); E12 iid 0.88 vs 0.64 (+0.24 [+0.12, +0.35]), ood 0.80 vs 0.40 (+0.40 [+0.27, +0.52]); the earlier split SFT without facts (a separate SFT run) iid 0.85 vs 0.64 (+0.21 [+0.10, +0.31]), ood 0.74 vs 0.60 (+0.14 [+0.01, +0.26]). n=100 rows per split, 4000 row resamples. Caveats: a keyword proxy, not a classifier; the source probe is a tie at the ceiling (z_L 0.999, z_H 0.992), so this is a difference in what the verbalizer extracts, not in what the vectors hold; the L-versus-H genre gap may partly come from the L call writing a genre sentence first. Use it as a supporting observation, not as a headline.
+
+# Better single example: SimpleStories, token 308 of 319, the token is "she" (true position 5 of 5)
+
+Chosen because both calls get the genre right (a children's story), unlike the earlier example 3 where the H call described an arithmetic problem. Selection: strict pattern (L call position right and token wrong, H call token right and position wrong) AND both calls name the right genre by the keyword rule: 5 of 175 non-last rows in E11 (3%), 7 of 175 in E12. The L call's wrong token ("they") is another pronoun, a near miss.
+
+**Prompt:** Along a winding path, a girl named Kim wandered. She had heard of a hidden cave with bright crystals. But rumors spoke of a ghost that haunted the cave. "I must find it," she told herself. She wanted to see the crystals and be brave, even if there was a ghost. As night fell, Kim held her flashlight tightly. The shadows danced around her. She heard a soft whisper in the wind. "Is it the ghost?" she thought, feeling a chill. But she pressed on, determined. Soon, she reached the cave's mouth, dark and foreboding. Inside the cave, the air was cool and still. She shone her light around. Suddenly, she heard a loud noise! "Is this the ghost?" she thought, feeling her heart pound. But as she looked, she saw a rock falling. "Just a rock!" she sighed, feeling silly for being scared. Deeper in the cave, she saw a glow. "The crystals!" she gasped. They sparkled like stars, filling the cave with light. As she reached out to touch one, she heard the whisper again. "Help me..." it said. Kim turned quickly, but it was just her imagination playing tricks on her. With the crystals in her hands, Kim felt strong. She had faced her fears. "I'm not afraid anymore," she shouted joyfully. She left the cave, feeling proud of her bravery. The ghost was only a story, and[ she] had found real magic.
+
+**L call (sees only z_L):**
+
+> Marked token: "they". Position: 5 of 5. The marked token is the pronoun "they" in a children's story about friendship between a boy and an alien, resolving to the two friends collectively.
+>
+> The state likely encodes that this is a narrative continuation task; the model must generate a fitting ending or response after the user turn ends.
+>
+> Key entities and arc: Leo (boy), the friendly alien, their shared adventure with shiny rocks, homecoming, and gratitude — a warm resolution already reached.
+>
+> Genre/register: simple fairy-tale-like children's story with short sentences, dialogue, and moral lesson ("friendship could take many forms").
+>
+> Local syntax: "they" is the subject of "returned," referring back to the pair as collective agents.
+
+**H call (sees only z_H):**
+
+> Marked token: "she". Position: 3 of 5. The marked token is the pronoun "she" in a children's story about Mia, so the state encodes its referent (Mia) and narrative context.
+>
+> The prompt poses an implicit comprehension question: what happened to Mia after she returned home — likely answered by the ending ("home," "wonderful day").
+>
+> Key entities/constraints: Mia, her dog, the lost puppy found on the porch; emotional arc from sadness to joy.
+>
+> Genre/register: simple fairy-tale-like children's story with dialogue, past tense, happy resolution.
+
+**What is right and wrong:** L call: position right (5 of 5), genre right (children's story, a narrative continuation task where the model must produce an ending after the user turn: true), token wrong but a near miss ("they" for "she"), characters invented (a boy, an alien, Leo). H call: token right ("she", a pronoun in a children's story), genre right, position wrong (3 of 5, true 5), the named referent invented (Mia), details after that invented. Backup with the same pattern and a digit token: gsm-symbolic token 14 of 52 ("2" in "20 days"): the H call names "2", the L call names the NEXT digit "0" (the neighbouring token), both state a math word problem but invent its numbers.
