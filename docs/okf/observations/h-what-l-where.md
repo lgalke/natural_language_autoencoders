@@ -26,6 +26,8 @@ Sources: [token probe](/observations/token-probe.md), [experiments](/experiments
 
 # How strong it is
 
+- **After RL (E12, RL from the position-fact SFT, 500 steps):** the dissociation survives: interaction +0.540 [+0.379, +0.701] iid and +0.398 [+0.250, +0.545] ood (non-last, 87 / 88 rows). RL raised the L call's token reading on iid from 0.093 to 0.198 (still well below the H call's 0.419); the H call stays at chance on position. Figures: `docs/okf/figures/dissociation_{iid,ood}_nonlast_E12.png`. Same SFT run as E11, so this is not a replicate.
+
 - **E11 intervals (5000 row resamples, non-last):** the interaction (position L minus H) minus (token L minus H) is +0.598 [+0.437, +0.759] on iid and +0.386 [+0.239, +0.534] on ood; each contrast alone also excludes zero (token H minus L +0.333 [+0.230, +0.437] iid; position L minus H +0.264 [+0.138, +0.391] iid). Figures: `docs/okf/figures/dissociation_{iid,ood}_nonlast_E11.png`. These intervals cover which rows were drawn, not which SFT run: still one run.
 
 - Probe level: large margins (0.25 for the token at offset 0, 0.06 to 0.07 for position, intervals about 0.013 to 0.017), consistent across offsets, not closed by an MLP. The token deficit of z_L is mostly sample efficiency (learning curve), not absent information. Position is the only probed target where z_L wins; source identity is a tie at the ceiling.
