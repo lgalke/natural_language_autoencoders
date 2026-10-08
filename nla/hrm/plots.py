@@ -6,6 +6,7 @@
     python -m nla.hrm.plots bars    --results results.json --metrics tok_L tok_H --split iid --subset non-last \\
                                     --models E7 SplitSFT --out figs/token_fields.png
     python -m nla.hrm.plots dissociation --results results.json --model E11 --split iid --subset non-last --out figs/dissoc.png
+    python -m nla.hrm.plots hwhat   --results results.json --model E11 --out figs/h_what_l_where.png   # PNG + SVG
     python -m nla.hrm.plots judge   --results results.json --model E7 --out figs/judge.png
     python -m nla.hrm.plots curves  --log E8=rl_ver.log E9=rl_split.log --keys fve_sum kl --out figs/curves.png
     python -m nla.hrm.plots curves  --blocks E7=e7_blocks.txt --keys fve_sum --out figs/e7_blocks.png
@@ -131,6 +132,64 @@ def cmd_dissociation(a) -> None:
     _save(fig, a.out)
 
 
+# Linear probes on the stored vectors (docs/okf/observations/token-probe.md; non-last rows, held-out prompt groups):
+# target -> (n test rows, majority baseline, z_L accuracy, z_H accuracy)
+PROBES = [
+    ("current\ntoken", 3224, 0.083, 0.739, 0.989),
+    ("previous\ntoken", 3275, 0.082, 0.609, 0.764),
+    ("next\ntoken", 3182, 0.086, 0.584, 0.734),
+    ("position\n(fifth)", 5425, 0.199, 0.669, 0.607),
+    ("source\n(5 datasets)", 5425, 0.368, 0.999, 0.992),
+]
+
+
+def _binom_ci(p: float, n: int) -> float:
+    return 1.96 * (p * (1 - p) / n) ** 0.5
+
+
+def cmd_hwhat(a) -> None:
+    """The headline figure: left, linear probes on z_L / z_H; right, the split verbalizer's per-call accuracy on the same two
+    facts (marked token, position fifth). Colour = stream everywhere (blue L, orange H). Saves PNG and SVG."""
+    res = json.load(open(a.results))["models"][a.model]
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 4.8), gridspec_kw={"width_ratios": [5, 4]})
+    w = 0.19
+    for gi, (label, n, maj, zl, zh) in enumerate(PROBES):
+        for ci, (val, color) in enumerate(((zl, SERIES[0]), (zh, SERIES[1]))):
+            x = gi + (ci - 0.5) * (w + 0.03)
+            ax1.bar(x, val, width=w, color=color, zorder=3)
+            ax1.errorbar(x, val, yerr=_binom_ci(val, n), fmt="none", ecolor=INK, elinewidth=1.2, capsize=0, zorder=4)
+        ax1.hlines(maj, gi - 0.3, gi + 0.3, colors=NEUTRAL, linewidth=1.6, zorder=2)
+    ax1.set_xticks(range(len(PROBES)), [p[0] for p in PROBES])
+    ax1.set_ylim(0, 1.05)
+    _style(ax1, "linear-probe test accuracy", "Probes on the vectors: z_H = what, z_L = where")
+
+    groups = [("token", "tok", "iid", CHANCE_TOKEN), ("token", "tok", "ood", CHANCE_TOKEN),
+              ("position", "pos", "iid", 0.20), ("position", "pos", "ood", 0.20)]
+    for gi, (_, key, split, chance) in enumerate(groups):
+        cell = res[split]["non-last"]
+        for ci, (call, color) in enumerate((("L", SERIES[0]), ("H", SERIES[1]))):
+            c = cell[f"{key}_{call}"]
+            x = gi + (ci - 0.5) * (w + 0.03)
+            ax2.bar(x, c["est"], width=w, color=color, zorder=3)
+            ax2.errorbar(x, c["est"], yerr=[[c["est"] - c["lo"]], [c["hi"] - c["est"]]], fmt="none", ecolor=INK,
+                         elinewidth=1.2, capsize=0, zorder=4)
+        ax2.hlines(chance, gi - 0.3, gi + 0.3, colors=NEUTRAL, linewidth=1.6, zorder=2)
+    ax2.set_xticks(range(len(groups)), [f"{g[0]}\n{g[2]}" for g in groups])
+    ax2.set_ylim(0, 1.05)
+    _style(ax2, "share of stated facts correct", "Verbalizer, one stream per call")
+    ax1.set_ylim(0, 1.05)
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
+    handles = [Patch(color=SERIES[0], label="L  (z_L  /  L call)"), Patch(color=SERIES[1], label="H  (z_H  /  H call)"),
+               Line2D([0], [0], color=NEUTRAL, linewidth=1.6, label="chance / majority")]
+    fig.legend(handles=handles, loc="lower center", ncol=3, frameon=False, fontsize=11, labelcolor=INK2)
+    fig.tight_layout(rect=(0, 0.07, 1, 1))
+    Path(a.out).parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(a.out, dpi=200, facecolor=SURFACE)
+    fig.savefig(str(Path(a.out).with_suffix(".svg")), facecolor=SURFACE)
+    print(f"wrote {a.out} and {Path(a.out).with_suffix('.svg')}")
+
+
 def cmd_judge(a) -> None:
     res = json.load(open(a.results))["judge"][a.model]
     fig, axes = plt.subplots(1, 2, figsize=(9, 4.4), sharey=True)
@@ -252,6 +311,11 @@ def main() -> None:
     d.add_argument("--title", default=None)
     d.add_argument("--out", required=True)
     d.set_defaults(fn=cmd_dissociation)
+    h = sub.add_parser("hwhat", help="headline figure: probes (left) and split-verbalizer per-call accuracy (right)")
+    h.add_argument("--results", required=True)
+    h.add_argument("--model", required=True, help="a split-verbalizer model in results.json with pos_* / tok_* metrics (E11)")
+    h.add_argument("--out", required=True)
+    h.set_defaults(fn=cmd_hwhat)
     j = sub.add_parser("judge")
     j.add_argument("--results", required=True)
     j.add_argument("--model", required=True)
