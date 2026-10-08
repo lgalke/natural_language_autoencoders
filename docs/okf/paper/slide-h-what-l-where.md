@@ -53,3 +53,37 @@ Selection rule: rows where the L call states the position right and the token wr
    - H call: `Marked token: "of". Position: 1 of 5.`
 
 Say on the slide: the facts come out as the probes predict; the surrounding prose is invented (for example the H call for example 1 goes on about "a bag of popcorn" and a list of purchases, for a story about a car made of flowers), so do not show it.
+
+# Figure instead of the tables
+
+`docs/okf/figures/h_what_l_where.png` (and `.svg`, vector, better for slides): left, linear probes on z_L (blue) and z_H (orange) for five targets with majority baselines; right, the split verbalizer's per-call accuracy (E11, non-last rows, 95% CI over rows) on the marked token and the position fact, iid and ood, with chance. Regenerate: `python -m nla.hrm.bootstrap --dump E11=samples_split_sft_pos.jsonl --out results.json && python -m nla.hrm.plots hwhat --results results.json --model E11 --out docs/okf/figures/h_what_l_where.png`. The probe values in the left panel are the constants in `nla/hrm/plots.py` (`PROBES`, from [token probe](/observations/token-probe.md)); the error bars there are binomial intervals over the probe test rows.
+
+# Copy-paste block for the slides (plain text)
+
+Example 1 (SimpleStories, token 15 of 123)
+Prompt: ...a girl discovered a car made [of] flowers and vines...
+Truth: token "of", position 1 of 5
+L call (sees only z_L): Marked token: "the". Position: 1 of 5.    position right, token wrong
+H call (sees only z_H): Marked token: "of". Position: 2 of 5.     token right, position wrong
+
+Example 2 (GSM-symbolic, token 48 of 104)
+Prompt: ...a pair of swimming leggings for $9 more than the jersey cost, and [a] pair of cleats...
+Truth: token "a", position 3 of 5
+L call (sees only z_L): Marked token: "the". Position: 3 of 5.    position right, token wrong
+H call (sees only z_H): Marked token: "a". Position: 1 of 5.      token right, position wrong
+
+Example 3 (SimpleStories, token 184 of 194)
+Prompt: ...a sparkle in the air, a reminder [of] their colorful adventure.
+Truth: token "of", position 5 of 5
+L call (sees only z_L): Marked token: "the". Position: 5 of 5.    position right, token wrong
+H call (sees only z_H): Marked token: "of". Position: 1 of 5.     token right, position wrong
+
+Footnote for the slide: examples are rows where this full pattern occurs (13% of iid rows; the reverse pattern occurs in 0%); the rest of each explanation is invented prose and is not shown.
+
+Table form (paste into a slide table):
+
+| Prompt (marked token in brackets) | Truth | L call (z_L only) | H call (z_H only) |
+|---|---|---|---|
+| ...a girl discovered a car made [of] flowers and vines... | "of", 1 of 5 | "the", 1 of 5 | "of", 2 of 5 |
+| ...swimming leggings for $9 more than the jersey cost, and [a] pair of cleats... | "a", 3 of 5 | "the", 3 of 5 | "a", 1 of 5 |
+| ...a sparkle in the air, a reminder [of] their colorful adventure. | "of", 5 of 5 | "the", 5 of 5 | "of", 1 of 5 |
