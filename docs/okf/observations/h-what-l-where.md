@@ -33,6 +33,10 @@ Sources: [token probe](/observations/token-probe.md), [experiments](/experiments
 - Probe level: large margins (0.25 for the token at offset 0, 0.06 to 0.07 for position, intervals about 0.013 to 0.017), consistent across offsets, not closed by an MLP. The token deficit of z_L is mostly sample efficiency (learning curve), not absent information. Position is the only probed target where z_L wins; source identity is a tie at the ceiling.
 - Verbalizer level: a double dissociation, each call at chance on the other's fact, from ONE SFT run with ONE seed, evaluated on 87 / 88 non-last rows (row intervals above).
 
+# A supporting observation: the L call also states the genre better
+
+Crude keyword rule (the source's genre word anywhere in the field), n=100 per split: E11 iid L call 0.78 vs H call 0.55 (paired +0.23 [+0.12, +0.34]), ood 0.77 vs 0.34 (+0.43 [+0.31, +0.55]); E12 and the earlier split SFT without facts (a separate SFT run) point the same way (details in [full examples](/paper/slide-examples-full.md)). The source probe is a tie at the ceiling, so this is extraction, not content. Suggests the refinement "L holds where and what kind of document; H holds the local token", to be tested with a real genre/classification probe.
+
 # What would falsify or weaken it
 
 - The SFT replicate (with `--facts position`) does not reproduce the pattern.

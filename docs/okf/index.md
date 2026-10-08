@@ -45,6 +45,7 @@ okf_version: "0.1"
 * [Methods notes](/paper/methods-notes.md) - reusable prose, parameters and caveats for a methods section
 * [Talk outline](/paper/talk-outline.md) - slide-by-slide structure with sourced numbers, say / do not say, pending items
 * [One slide: H what, L where](/paper/slide-h-what-l-where.md) - the probe table, the verbalizer table and three examples, copy-ready
+* [Full responses for the three examples](/paper/slide-examples-full.md) - verbatim L and H call texts, right versus invented, genre rates per call
 
 # History
 * [Log](/log.md) - dated record of changes to this bundle and the code
