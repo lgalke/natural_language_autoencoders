@@ -43,6 +43,7 @@ okf_version: "0.1"
 
 # Paper
 * [Methods notes](/paper/methods-notes.md) - reusable prose, parameters and caveats for a methods section
+* [Talk outline](/paper/talk-outline.md) - slide-by-slide structure with sourced numbers, say / do not say, pending items
 
 # History
 * [Log](/log.md) - dated record of changes to this bundle and the code
