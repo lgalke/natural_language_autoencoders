@@ -84,8 +84,25 @@ def dump_results(rows: list[dict], n_boot: int, seed: int) -> dict:
                 continue
             rng = np.random.default_rng(seed)
             arrays = row_arrays(sel)
-            res.setdefault(split, {})[subset] = {m: summarise(*arrays[m], rng, n_boot) for m in METRICS_DUMP}
+            cell = {m: summarise(*arrays[m], rng, n_boot) for m in METRICS_DUMP}
+            if subset == "non-last" and arrays["pos_L"][1].sum() > 0:
+                cell["contrast"] = within_contrasts(arrays, len(sel), n_boot, seed)
+            res.setdefault(split, {})[subset] = cell
     return res
+
+
+def within_contrasts(arrays: dict, n: int, n_boot: int, seed: int) -> dict:
+    """Paired within-model contrasts over the same rows (a row without a stated fact counts as incorrect):
+    tok_HL = token H call minus L call, pos_LH = position L call minus H call, interaction = pos_LH - (token L - H)."""
+    g = {m: arrays[m][0] for m in ("tok_L", "tok_H", "pos_L", "pos_H")}
+    vals = {"tok_HL": g["tok_H"] - g["tok_L"], "pos_LH": g["pos_L"] - g["pos_H"]}
+    vals["interaction"] = vals["pos_LH"] + vals["tok_HL"]
+    idx = np.random.default_rng(seed + 1).integers(0, n, (n_boot, n))
+    out = {}
+    for k, x in vals.items():
+        lo, hi = interval(x[idx].mean(1))
+        out[k] = {"est": float(x.mean()), "lo": lo, "hi": hi, "n_rows": n}
+    return out
 
 
 def paired_results(rows_a: list[dict], rows_b: list[dict], n_boot: int, seed: int) -> dict:

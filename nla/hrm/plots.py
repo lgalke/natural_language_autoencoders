@@ -123,7 +123,7 @@ def cmd_dissociation(a) -> None:
     fig, ax = plt.subplots(figsize=(7.8 if len(models) > 1 else 7.4, 4.8))
     nb = 2 * len(models)
     width = min(0.2, 0.62 / nb)
-    hatches = ["", "////", "xxxx"]
+    hatches = ["", "////", "xxxx", "...."]
     for gi, (_, key, chance) in enumerate(groups):
         for mi, model in enumerate(models):
             cell = res[model][a.split][a.subset]
@@ -202,6 +202,34 @@ def cmd_hwhat(a) -> None:
     fig.savefig(a.out, dpi=200, facecolor=SURFACE)
     fig.savefig(str(Path(a.out).with_suffix(".svg")), facecolor=SURFACE)
     print(f"wrote {a.out} and {Path(a.out).with_suffix('.svg')}")
+
+
+def cmd_runs(a) -> None:
+    """Forest plot of the within-model contrasts (token H-L, position L-H, interaction) per independent run, iid and ood."""
+    res = json.load(open(a.results))["models"]
+    models = a.models or list(res)
+    names = [("tok_HL", "token: H call minus L call"), ("pos_LH", "position: L call minus H call"),
+             ("interaction", "interaction (sum of both)")]
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.4), sharey=True)
+    for ax, split in zip(axes, ("iid", "ood"), strict=True):
+        for gi, (key, _) in enumerate(names):
+            for mi, model in enumerate(models):
+                c = res[model][split]["non-last"]["contrast"][key]
+                y = gi + (mi - (len(models) - 1) / 2) * 0.18
+                ax.errorbar(c["est"], y, xerr=[[c["est"] - c["lo"]], [c["hi"] - c["est"]]], fmt="none", ecolor=SERIES[mi % 4],
+                            elinewidth=2, capsize=0, zorder=3)
+                ax.plot(c["est"], y, "o", color=SERIES[mi % 4], markersize=8, markeredgecolor=SURFACE, markeredgewidth=1.5,
+                        zorder=4, label=model if gi == 0 else None)
+        ax.axvline(0, color=INK2, linewidth=0.8, zorder=1)
+        ax.set_yticks(range(len(names)), [n[1] for n in names])
+        ax.invert_yaxis()
+        ax.xaxis.grid(True, color=GRID, linewidth=0.8)
+        ax.yaxis.grid(False)
+        _style(ax, "", f"{split}, non-last rows (95% CI over rows)")
+        ax.yaxis.grid(False)
+        ax.set_xlabel("difference in share correct", color=INK2, fontsize=11)
+    axes[0].legend(frameon=False, fontsize=10, loc="upper center", bbox_to_anchor=(1.1, -0.18), ncol=len(models), labelcolor=INK2)
+    _save(fig, a.out)
 
 
 def cmd_judge(a) -> None:
@@ -326,6 +354,11 @@ def main() -> None:
     d.add_argument("--title", default=None)
     d.add_argument("--out", required=True)
     d.set_defaults(fn=cmd_dissociation)
+    r = sub.add_parser("runs", help="forest plot of the within-model contrasts per independent run")
+    r.add_argument("--results", required=True)
+    r.add_argument("--models", nargs="+", default=None)
+    r.add_argument("--out", required=True)
+    r.set_defaults(fn=cmd_runs)
     h = sub.add_parser("hwhat", help="headline figure: probes (left) and split-verbalizer per-call accuracy (right)")
     h.add_argument("--results", required=True)
     h.add_argument("--model", required=True, help="a split-verbalizer model in results.json with pos_* / tok_* metrics (E11)")

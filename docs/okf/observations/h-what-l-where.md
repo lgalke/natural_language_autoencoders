@@ -26,6 +26,8 @@ Sources: [token probe](/observations/token-probe.md), [experiments](/experiments
 
 # How strong it is
 
+- **Four independent SFT runs (2026-10-10), the strongest statement:** the interaction (position L-H plus token H-L, non-last) is positive with an interval excluding zero in all 8 run-by-split cells: iid +0.598 / +0.448 / +0.310 / +0.540 (mean +0.474, SD 0.125), ood +0.386 / +0.227 / +0.341 / +0.341 (mean +0.324, SD 0.068). Each half fails once (token iid in run 3, position ood in run 2). Figure: `docs/okf/figures/dissociation_four_runs_forest.png`. Details in [experiments](/experiments.md).
+
 - **Replicate (independent SFT run, 2026-10-09):** the token half replicates on both splits (H call minus L call +0.241 [+0.149, +0.345] iid, +0.193 [+0.102, +0.284] ood); the position half replicates on iid (L call minus H call +0.207 [+0.092, +0.333]) but NOT on ood (+0.034 [-0.068, +0.136], against +0.193 in the first run). Interaction +0.448 [+0.299, +0.609] iid, +0.227 [+0.080, +0.375] ood (first run +0.598, +0.386). In the replicate the L call is also above chance on the token on iid (0.195). Figure: `docs/okf/figures/dissociation_{iid,ood}_nonlast_E11_vs_replicate.png`. So: "H reads WHAT" is replicated; "L holds WHERE" is supported on iid by the probe (z_L 0.669 vs 0.607) and by two runs, and weaker on ood.
 
 - **After RL (E12, RL from the position-fact SFT, 500 steps):** the dissociation survives: interaction +0.540 [+0.379, +0.701] iid and +0.398 [+0.250, +0.545] ood (non-last, 87 / 88 rows). RL raised the L call's token reading on iid from 0.093 to 0.198 (still well below the H call's 0.419); the H call stays at chance on position. Figures: `docs/okf/figures/dissociation_{iid,ood}_nonlast_E12.png`. Same SFT run as E11, so this is not a replicate.
