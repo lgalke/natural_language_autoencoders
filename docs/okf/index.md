@@ -44,6 +44,7 @@ okf_version: "0.1"
 # Paper
 * [Methods notes](/paper/methods-notes.md) - reusable prose, parameters and caveats for a methods section
 * [Talk outline](/paper/talk-outline.md) - slide-by-slide structure with sourced numbers, say / do not say, pending items
+* [Q&A preparation](/paper/qa-prep.md) - likely questions after the talk with short honest answers and the numbers
 * [One slide: H what, L where](/paper/slide-h-what-l-where.md) - the probe table, the verbalizer table and three examples, copy-ready
 * [Full responses for the three examples](/paper/slide-examples-full.md) - verbatim L and H call texts, right versus invented, genre rates per call
 * [The single slide example (SimpleStories, "she")](/paper/slide-example-she.md) - full L and H call texts, facts vs truth, selection rule
