@@ -72,7 +72,7 @@ def fit_injection_scale_p75(verbalizer_model: str, sample_texts: list[str], devi
             ids = tok(text, return_tensors="pt", truncation=True, max_length=256).to(device)
             out = model(**ids, output_hidden_states=True, logits_to_keep=1)
             h = out.hidden_states[-1][0]  # [T, d]
-            norms.append(h.float().norm(dim=-1))
+            norms.append(h.float().norm(dim=-1).cpu())
     all_norms = torch.cat(norms).numpy()
     return float(np.percentile(all_norms, 75))
 
