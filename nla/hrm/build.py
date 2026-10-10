@@ -44,6 +44,7 @@ from nla.datagen._common import add_storage_args, make_storage
 from nla.datagen.injection_tokens import compute_critic_suffix_ids
 from nla.hrm.injection import compute_canonical_neighbors_two, find_two_injection_tokens
 from nla.hrm.model import DEFAULT_VERBALIZER
+from nla.hrm.facts import field_prefix
 from nla.hrm.sidecar import HrmTokenMeta, read_sidecar, write_sidecar
 
 _INJECT_L_PLACEHOLDER = "<INJECT_L>"
@@ -142,6 +143,9 @@ def main() -> None:
                     help="av_sft/ar_sft only: prepend 'Marked token: \"X\".' (from the stored context) to every L/H field. "
                          "The token is linearly decodable from the vectors (probe_check), so this is a strongly supervised, "
                          "learnable target, and eval's quote accuracy then measures whether the AV reads it. No LLM calls.")
+    p.add_argument("--position-fact", action="store_true",
+                    help="av_sft/ar_sft only (with --prefix-token): also write `Position: K of 5.` (which fifth of the prompt; "
+                         "from the position and prompt_len columns) after the token fact in every L/H field; no LLM calls")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--keep-debug-metadata", action=argparse.BooleanOptionalAction, default=True)
     add_storage_args(p)
@@ -151,6 +155,7 @@ def main() -> None:
         "--actor-template must contain both {inj_L} and {inj_H}"
     )
     assert not args.prefix_token or args.stage in ("av_sft", "ar_sft"), "--prefix-token only applies to av_sft/ar_sft"
+    assert not args.position_fact or args.prefix_token, "--position-fact needs --prefix-token (the facts open the field)"
     if args.stage == "ar_sft":
         assert "{explanation}" in args.critic_template, "--critic-template must contain {explanation}"
 
@@ -195,8 +200,11 @@ def main() -> None:
                 e1 = batch.column("api_explanation_1").to_pylist()
                 if args.prefix_token:
                     assert "context_marked" in batch.schema.names, "--prefix-token needs the context_marked column"
-                    pre = [token_prefix(c) for c in batch.column("context_marked").to_pylist()]
-                    e0, e1 = [a + b for a, b in zip(pre, e0, strict=True)], [a + b for a, b in zip(pre, e1, strict=True)]
+                    poss = batch.column("position").to_pylist() if args.position_fact else [None] * n
+                    lens = batch.column("prompt_len").to_pylist() if args.position_fact else [None] * n
+                    pre = [field_prefix(token_prefix(c), q, ln, args.position_fact)
+                           for c, q, ln in zip(batch.column("context_marked").to_pylist(), poss, lens, strict=True)]
+                    e0, e1 = [(a + b).strip() for a, b in zip(pre, e0, strict=True)], [(a + b).strip() for a, b in zip(pre, e1, strict=True)]
                 responses = []
                 for i in range(n):
                     rng = random.Random(hashlib.sha256(f"{args.seed}|{doc_ids[i]}|av".encode()).digest())
@@ -221,8 +229,11 @@ def main() -> None:
                 e1 = batch.column("api_explanation_1").to_pylist()
                 if args.prefix_token:
                     assert "context_marked" in batch.schema.names, "--prefix-token needs the context_marked column"
-                    pre = [token_prefix(c) for c in batch.column("context_marked").to_pylist()]
-                    e0, e1 = [a + b for a, b in zip(pre, e0, strict=True)], [a + b for a, b in zip(pre, e1, strict=True)]
+                    poss = batch.column("position").to_pylist() if args.position_fact else [None] * n
+                    lens = batch.column("prompt_len").to_pylist() if args.position_fact else [None] * n
+                    pre = [field_prefix(token_prefix(c), q, ln, args.position_fact)
+                           for c, q, ln in zip(batch.column("context_marked").to_pylist(), poss, lens, strict=True)]
+                    e0, e1 = [(a + b).strip() for a, b in zip(pre, e0, strict=True)], [(a + b).strip() for a, b in zip(pre, e1, strict=True)]
                 zL_list = batch.column("z_L").to_pylist()
                 zH_list = batch.column("z_H").to_pylist()
                 for head_name, expls, targets in (("L", e0, zL_list), ("H", e1, zH_list)):
@@ -292,7 +303,8 @@ def main() -> None:
         created_at="",
         git_commit="",
         api_summary=None,
-        build_options={"prefix_token": True} if args.prefix_token else None,
+        build_options=({"prefix_token": True, **({"position_fact": True} if args.position_fact else {})}
+                       if args.prefix_token else None),
     )
     write_sidecar(storage, args.output, out_meta)
     print(f"wrote {row_count} rows ({args.stage}) → {args.output}")

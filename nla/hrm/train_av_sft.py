@@ -115,6 +115,9 @@ def main() -> None:
     p.add_argument("--save-every", type=int, default=0,
                     help="also save the adapter to <output>/step_N every N steps (0 = only at the end)")
     p.add_argument("--max-steps", type=int, default=None, help="hard cap in addition to --epochs")
+    p.add_argument("--init-from", default=None,
+                    help="continue from an earlier train_av_sft checkpoint dir (av adapter + injection adapters): e.g. stage 2 "
+                         "(teacher prose) after a facts-only stage 1 on many more rows; --injection-scale-init is then ignored")
     p.add_argument("--log-every", type=int, default=20)
     p.add_argument("--output", required=True)
     args = p.parse_args()
@@ -142,6 +145,12 @@ def main() -> None:
     inj_L = InjectionAdapter(_D_MIMIR, model.config.hidden_size, init_scale=init_scale).to(args.device)
     inj_H = InjectionAdapter(_D_MIMIR, model.config.hidden_size, init_scale=init_scale).to(args.device)
     print(f"[train_av_sft] injection scale init = {init_scale}")
+    if args.init_from:
+        from nla.hrm.model import ReconHeads as _RH
+        from nla.hrm.model import load_extra_modules, load_sft_adapter
+        load_sft_adapter(model, args.init_from, "av")
+        load_extra_modules(f"{args.init_from}/extra_modules.safetensors", inj_L, inj_H, _RH(_D_MIMIR, model.config.hidden_size))
+        print(f"[train_av_sft] initialised the av adapter and the injection adapters from {args.init_from}")
 
     for name, param in model.named_parameters():
         param.requires_grad_(".av." in name and ".av_ref." not in name)

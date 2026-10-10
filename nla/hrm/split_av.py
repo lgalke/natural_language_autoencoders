@@ -24,6 +24,7 @@ import pyarrow.parquet as pq
 
 from nla.datagen.storage import LocalStorage
 from nla.hrm.build import wrap_lh_explanation
+from nla.hrm.facts import has_position_fact, position_bin, position_sentence  # noqa: F401  (position_bin re-exported)
 from nla.hrm.recon import parse_fields, parse_single
 from nla.hrm.sidecar import read_sidecar, write_sidecar
 
@@ -47,14 +48,12 @@ def join_split(l_completion: str, h_completion: str) -> str:
     return wrap_lh_explanation(l_text, h_text) if l_text and h_text else ""
 
 
-def position_bin(position: int, prompt_len: int) -> int:
-    """1..5: which fifth of the prompt the extraction position is in (same bins as `probe_check --target relpos`)."""
-    return min(int(5 * position / prompt_len), 4) + 1
-
-
 def add_position_fact(text: str, position: int, prompt_len: int) -> str:
-    """Insert `Position: K of 5. ` right after the `Marked token: "X". ` prefix (or at the start)."""
-    fact = f"Position: {position_bin(position, prompt_len)} of 5. "
+    """Insert `Position: K of 5. ` right after the `Marked token: "X". ` prefix (or at the start); a text that already has a
+    position fact (built with `build --position-fact`) is returned unchanged."""
+    if has_position_fact(text):
+        return text
+    fact = position_sentence(position, prompt_len) + " "
     m = re.match(r'(Marked token: "[^"]*"\. )', text)
     return (m.group(1) + fact + text[m.end():]) if m else fact + text
 
