@@ -102,6 +102,39 @@ def _rows_from_local_jsonl(path: str, default_dataset: str) -> list[dict]:
     return rows
 
 
+def prompt_hash(prompt: str) -> str:
+    import hashlib
+    return hashlib.sha1(" ".join(prompt.split()).encode("utf-8")).hexdigest()
+
+
+def filter_local_rows(rows: list[dict], exclude_hashes: set[str], drop_datasets: set[str],
+                      max_per_dataset: int | None, seed: int) -> tuple[list[dict], dict[str, int]]:
+    """Local-corpus hygiene: drop datasets (e.g. the held-out OOD source), drop prompts that already occur in another
+    corpus (whitespace-normalised exact match: keeps a v2 training corpus clear of the v1 eval prompts), then cap the rows
+    per dataset with a seeded sample. Returns (rows, counts of what was removed)."""
+    import random
+    stats = {"dropped_dataset": 0, "dropped_duplicate": 0, "dropped_cap": 0}
+    kept = []
+    for r in rows:
+        if r["dataset"] in drop_datasets:
+            stats["dropped_dataset"] += 1
+        elif exclude_hashes and prompt_hash(r["prompt"]) in exclude_hashes:
+            stats["dropped_duplicate"] += 1
+        else:
+            kept.append(r)
+    if max_per_dataset is not None:
+        by: dict[str, list[dict]] = {}
+        for r in kept:
+            by.setdefault(r["dataset"], []).append(r)
+        kept = []
+        for name in sorted(by):
+            rs = by[name]
+            random.Random(f"{seed}|{name}").shuffle(rs)
+            kept += rs[:max_per_dataset]
+            stats["dropped_cap"] += max(0, len(rs) - max_per_dataset)
+    return kept, stats
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--source", action="append", default=[],
@@ -115,6 +148,13 @@ def main() -> None:
                     help="cap rows pulled per HF source (random subsample, keyed on --seed)")
     p.add_argument("--strict", action="store_true", help="fail on the first broken source instead of skipping it")
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--local-max-per-dataset", type=int, default=None,
+                   help="cap the rows per 'dataset' value of the local JSONL (seeded sample); --max-per-source only caps HF sources")
+    p.add_argument("--exclude-from", action="append", default=[],
+                   help="corpus JSONL whose prompts are removed from the local rows (whitespace-normalised exact match); "
+                        "use the v1 corpus.jsonl so the v2 training corpus does not contain the v1 eval prompts")
+    p.add_argument("--drop-dataset", action="append", default=[],
+                   help="drop local rows of this 'dataset' value (repeatable), e.g. the held-out OOD source musr")
     p.add_argument("--output", required=True)
     args = p.parse_args()
 
@@ -136,6 +176,13 @@ def main() -> None:
     for path in args.local_jsonl:
         rows = _rows_from_local_jsonl(path, args.local_jsonl_dataset_name)
         print(f"  local:{path}: {len(rows)} rows")
+        exclude = set()
+        for ex in args.exclude_from:
+            with open(ex) as f:
+                exclude |= {prompt_hash(json.loads(line)["prompt"]) for line in f if line.strip()}
+        if exclude or args.drop_dataset or args.local_max_per_dataset is not None:
+            rows, stats = filter_local_rows(rows, exclude, set(args.drop_dataset), args.local_max_per_dataset, args.seed)
+            print(f"    filters ({len(exclude)} excluded prompt hashes): {stats} -> {len(rows)} rows kept")
         all_rows += rows
 
     doc_ids = [r["doc_id"] for r in all_rows]
