@@ -40,7 +40,7 @@ from nla.hrm.model import (
     DEFAULT_VERBALIZER, add_frozen_reference_adapter, build_inputs_embeds,
     load_rl_checkpoint, load_verbalizer, save_extra_modules,
 )
-from nla.hrm.verifiable import verifiable_bonus, verifiable_terms
+from nla.hrm.verifiable import split_call_rewards, verifiable_bonus, verifiable_terms
 from nla.hrm.recon import ReconLoss, ReconWeights, failed_reward, loss_to_reward, parse_fields, recon_loss
 from nla.hrm.sidecar import HrmDatasetMeta, read_sidecar
 from nla.hrm.split_av import join_split, tag_content
@@ -51,7 +51,7 @@ _CJK_RE = re.compile(r"[㈀-㏿一-鿿]")
 
 def _load_rl_rows(parquet_path: str) -> tuple[list[dict], HrmDatasetMeta]:
     names = pq.ParquetFile(parquet_path).schema_arrow.names
-    cols = ["prompt", "z_L", "z_H"] + [c for c in ("context_marked", "dataset", "position") if c in names]
+    cols = ["prompt", "z_L", "z_H"] + [c for c in ("context_marked", "dataset", "position", "prompt_len") if c in names]
     t = pq.read_table(parquet_path, columns=cols)
     return t.to_pylist(), read_sidecar(LocalStorage(), parquet_path)
 
@@ -256,6 +256,10 @@ def main() -> None:
                    help="split AV (nla/hrm/split_av.py): each rollout pair is TWO calls, one with only z_L (z_H zeroed) "
                         "writing the L field and one with only z_H writing the H field; the AV checkpoint must come from "
                         "train_av_sft on split_av.py's parquet. Two policy updates per step; in-training eval/sanity skipped.")
+    p.add_argument("--w-fact", type=float, default=0.0,
+                   help="split AV only: bonus per correctly stated fact (marked token, position fifth) for EACH call, both facts "
+                        "for both calls, added to that call's own reward (per-call advantages); last prompt positions get "
+                        "no bonus; 0 = off. Needs position and prompt_len in the RL parquet")
     p.add_argument("--w-token", type=float, default=0.0,
                    help="verifiable reward: bonus for quoting the REAL marked token (see verifiable.py); 0 = off")
     p.add_argument("--w-ground", type=float, default=0.0,
@@ -279,6 +283,10 @@ def main() -> None:
     model, tokenizer = load_verbalizer(verbalizer_model, device=args.device, torch_dtype=dtype)
     d_verb = model.config.hidden_size
     rows, meta = _load_rl_rows(args.rl_parquet)
+    if args.w_fact:
+        assert args.split_av, "--w-fact is defined for the split AV (--split-av) only"
+        assert all(r.get("context_marked") and r.get("position") is not None and r.get("prompt_len") for r in rows[:100]), (
+            "--w-fact needs context_marked, position and prompt_len columns in the RL parquet")
     if args.w_token or args.w_ground:
         assert all(r.get("context_marked") for r in rows[:100]), (
             "--w-token/--w-ground need the context_marked column in the RL parquet (build with debug metadata)")
@@ -340,14 +348,23 @@ def main() -> None:
                 if terms:
                     verif = {"token_ok": sum(t["token_correct"] for _, t in terms) / len(terms),
                              "ungrounded": sum(t["ungrounded"] for _, t in terms) / len(terms)}
-            rewards_t = torch.tensor(rewards, dtype=torch.float32).view(len(batch_rows), args.group_size)
-            mean, std = rewards_t.mean(dim=1, keepdim=True), rewards_t.std(dim=1, keepdim=True).clamp_min(1e-4)
-            advantages = ((rewards_t - mean) / std).view(-1)
+            def _advantages(rs: list[float]) -> torch.Tensor:
+                rt = torch.tensor(rs, dtype=torch.float32).view(len(batch_rows), args.group_size)
+                mean, std = rt.mean(dim=1, keepdim=True), rt.std(dim=1, keepdim=True).clamp_min(1e-4)
+                return ((rt - mean) / std).view(-1)
+
+            advantages = _advantages(rewards)
+            adv_L = adv_H = advantages
+            if args.w_fact:  # per-call rewards and advantages: each call is credited for its own stated facts
+                rewards_L, rewards_H, fact_rates = split_call_rewards(rewards, texts_L, texts_H, batch_rows,
+                                                                      args.group_size, args.w_fact)
+                adv_L, adv_H = _advantages(rewards_L), _advantages(rewards_H)
+                verif.update({f"fact_{k}": v for k, v in fact_rates.items()})
 
             if args.split_av:
-                pg_a, kl_a = policy_step(model, full_ids, full_attn, S, advantages, inj_L, inj_H, ids_meta,
+                pg_a, kl_a = policy_step(model, full_ids, full_attn, S, adv_L, inj_L, inj_H, ids_meta,
                                            z_L, z_H, policy_optim, args.kl_beta, args.device, mask_stream="H")
-                pg_b, kl_b = policy_step(model, full_ids_B, full_attn_B, S_B, advantages, inj_L, inj_H, ids_meta,
+                pg_b, kl_b = policy_step(model, full_ids_B, full_attn_B, S_B, adv_H, inj_L, inj_H, ids_meta,
                                            z_L, z_H, policy_optim, args.kl_beta, args.device, mask_stream="L")
                 pg_loss, kl_loss = (pg_a + pg_b) / 2, (kl_a + kl_b) / 2
             else:
