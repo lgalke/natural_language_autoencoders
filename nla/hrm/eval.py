@@ -33,7 +33,7 @@ from tqdm import tqdm
 from nla.hrm.devices import default_device, default_dtype
 from nla.hrm.build import _INJECT_H_PLACEHOLDER, _INJECT_L_PLACEHOLDER
 from nla.hrm.diagnostics import compute_stream_stats
-from nla.hrm.model import DEFAULT_VERBALIZER, load_rl_checkpoint, load_verbalizer
+from nla.hrm.model import DEFAULT_VERBALIZER, last_real_index, load_rl_checkpoint, load_verbalizer
 from nla.hrm.recon import ReconWeights, parse_fields, recon_loss
 from nla.hrm.sidecar import read_sidecar
 from nla.datagen.storage import LocalStorage
@@ -44,7 +44,8 @@ _D_MIMIR = 1536
 @torch.no_grad()
 def generate_and_reconstruct(model, tokenizer, rows, inj_l_char, inj_h_char, inj_L, inj_H, heads, ids_meta,
                                critic_template, device, max_new_tokens=300, batch_size=16, shuffle_vectors=False, within_dataset=False,
-                               swap_streams=False, best_of=1, sample_temperature=1.0, weights=None, split_av=False):
+                               swap_streams=False, best_of=1, sample_temperature=1.0, weights=None, split_av=False,
+                               critic_readout="last"):
     from nla.hrm.model import build_inputs_embeds
 
     # Best-of-N: candidate 0 is the greedy completion, candidates 1..N-1 are temperature samples of the same prompt; the
@@ -120,8 +121,7 @@ def generate_and_reconstruct(model, tokenizer, rows, inj_l_char, inj_h_char, inj
                                     add_special_tokens=False, truncation=True, max_length=512)
                 c_ids, c_attn = c_enc["input_ids"].to(device), c_enc["attention_mask"].to(device)
                 c_out = model(input_ids=c_ids, attention_mask=c_attn, output_hidden_states=True, logits_to_keep=1)
-                lengths = c_attn.sum(dim=1) - 1
-                h_last = c_out.hidden_states[-1][torch.arange(c_ids.shape[0]), lengths]
+                h_last = c_out.hidden_states[-1][torch.arange(c_ids.shape[0]), last_real_index(c_attn, critic_readout)]
                 n = len(ok_idx)
                 zL_pred, zH_pred = heads.forward_L(h_last[:n]), heads.forward_H(h_last[n:])
                 for j, i in enumerate(ok_idx):
@@ -434,6 +434,9 @@ def main() -> None:
                         "reconstruction is closest to the gold vectors; FVE is then selection-biased, token accuracy "
                         "and text are not. Cached as <output>.gen_<split>_bo<N>.pt")
     p.add_argument("--sample-temperature", type=float, default=1.0)
+    p.add_argument("--critic-readout", choices=["last", "legacy"], default="last",
+                   help="token the AR reads out: 'last' = last attended token (correct); 'legacy' = attn.sum-1, wrong for the "
+                        "left-padded batches used here: use it only to reproduce eval numbers logged before 2026-10-11")
     p.add_argument("--split-av", action="store_true",
                    help="the AV checkpoint is a split AV (nla/hrm/split_av.py): greedy L call (z_H zeroed) and H call "
                         "(z_L zeroed); cached as <output>.gen_<split>_split.pt")
@@ -472,7 +475,7 @@ def main() -> None:
         assert tm is not None
         ids_meta = (tm.injection_token_id_L, tm.injection_left_neighbor_id_L, tm.injection_right_neighbor_id_L,
                     tm.injection_token_id_H, tm.injection_left_neighbor_id_H, tm.injection_right_neighbor_id_H)
-        gen_path = f"{args.output}.gen_{name}{('_shufds' if args.shuffle_within_dataset else '_shuf') if args.shuffle_vectors else ''}{'_swap' if args.swap_streams else ''}{f'_bo{args.best_of}' if args.best_of > 1 else ''}{'_split' if args.split_av else ''}.pt"
+        gen_path = f"{args.output}.gen_{name}{('_shufds' if args.shuffle_within_dataset else '_shuf') if args.shuffle_vectors else ''}{'_swap' if args.swap_streams else ''}{f'_bo{args.best_of}' if args.best_of > 1 else ''}{'_split' if args.split_av else ''}{'_legacyreadout' if args.critic_readout == 'legacy' else ''}.pt"
         if args.reuse_generations and Path(gen_path).exists():
             saved = torch.load(gen_path)
             assert len(saved) == len(rows), f"{gen_path} has {len(saved)} rows, split now has {len(rows)}; drop --reuse-generations"
@@ -482,7 +485,8 @@ def main() -> None:
             results = generate_and_reconstruct(model, tokenizer, rows, tm.injection_char_L, tm.injection_char_H,
                                                  inj_L, inj_H, heads, ids_meta, meta.prompt_templates["critic"], args.device,
                                                  args.max_new_tokens, args.batch_size, args.shuffle_vectors, args.shuffle_within_dataset,
-                                                 args.swap_streams, args.best_of, args.sample_temperature, weights, args.split_av)
+                                                 args.swap_streams, args.best_of, args.sample_temperature, weights, args.split_av,
+                                                 args.critic_readout)
             torch.save([{k: v for k, v in r.items() if k != "row"} for r in results], gen_path)
         best_of_report(name, results)
         all_results[name] = results

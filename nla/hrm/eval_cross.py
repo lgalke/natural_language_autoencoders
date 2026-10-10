@@ -25,7 +25,7 @@ from tqdm import tqdm
 
 from nla.hrm.devices import default_device, default_dtype
 from nla.hrm.build import _INJECT_H_PLACEHOLDER, _INJECT_L_PLACEHOLDER
-from nla.hrm.model import DEFAULT_VERBALIZER, load_rl_checkpoint, load_verbalizer
+from nla.hrm.model import DEFAULT_VERBALIZER, last_real_index, load_rl_checkpoint, load_verbalizer
 from nla.hrm.recon import parse_fields
 from nla.hrm.sidecar import read_sidecar
 from nla.datagen.storage import LocalStorage
@@ -106,8 +106,7 @@ def _train_and_eval_probe(model, tokenizer, train_pairs, test_pairs, source: str
                               truncation=True, max_length=512)
             ids, attn = enc["input_ids"].to(device), enc["attention_mask"].to(device)
             out = model(input_ids=ids, attention_mask=attn, output_hidden_states=True, logits_to_keep=1)
-            lengths = attn.sum(dim=1) - 1
-            h_last = out.hidden_states[-1][torch.arange(ids.shape[0]), lengths]
+            h_last = out.hidden_states[-1][torch.arange(ids.shape[0]), last_real_index(attn)]
             pred = head(h_last)
             loss = ((normalize_activation(pred, scale) - normalize_activation(targets, scale)) ** 2).mean()
             optim.zero_grad()
@@ -124,8 +123,7 @@ def _train_and_eval_probe(model, tokenizer, train_pairs, test_pairs, source: str
                               add_special_tokens=False, truncation=True, max_length=512)
             ids, attn = enc["input_ids"].to(device), enc["attention_mask"].to(device)
             out = model(input_ids=ids, attention_mask=attn, output_hidden_states=True, logits_to_keep=1)
-            lengths = attn.sum(dim=1) - 1
-            preds.append(head(out.hidden_states[-1][torch.arange(ids.shape[0]), lengths]))
+            preds.append(head(out.hidden_states[-1][torch.arange(ids.shape[0]), last_real_index(attn)]))
         pred = torch.cat(preds)
         pred_n, target_n = normalize_activation(pred, scale), normalize_activation(test_targets, scale)
         mse = ((pred_n - target_n) ** 2).mean().item()

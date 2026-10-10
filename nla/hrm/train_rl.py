@@ -39,6 +39,7 @@ from nla.hrm.build import _INJECT_H_PLACEHOLDER, _INJECT_L_PLACEHOLDER
 from nla.hrm.model import (
     DEFAULT_VERBALIZER, add_frozen_reference_adapter, build_inputs_embeds,
     load_rl_checkpoint, load_verbalizer, save_extra_modules,
+    last_real_index,
 )
 from nla.hrm.verifiable import split_call_rewards, verifiable_bonus, verifiable_terms
 from nla.hrm.recon import ReconLoss, ReconWeights, failed_reward, loss_to_reward, parse_fields, recon_loss
@@ -110,6 +111,9 @@ def _generate_batch(model, tokenizer, rows, inj_l_char, inj_h_char, inj_L, inj_H
 # and for no-grad scoring. Set from --micro-batch-size in main(). Full-vocab logits and
 # activations for all B*G rollouts at once are what used to OOM a 95 GB GPU.
 _MICRO_BATCH = 8
+# Which token the AR reads out: "last" (the last attended token; correct under any padding side) or "legacy" (attn.sum - 1;
+# wrong for left-padded batches, see model.last_real_index). Set from --critic-readout in main().
+_CRITIC_READOUT = "last"
 
 
 def fve_from_mses(mses: dict, baseline: dict | None) -> dict[str, float]:
@@ -130,8 +134,7 @@ def _critic_hidden(model, tokenizer, texts: list[str], device: str) -> torch.Ten
     ids, attn = enc["input_ids"].to(device), enc["attention_mask"].to(device)
     # logits_to_keep=1: we only need hidden states; don't build [B, T, vocab] logits.
     out = model(input_ids=ids, attention_mask=attn, output_hidden_states=True, logits_to_keep=1)
-    lengths = attn.sum(dim=1) - 1
-    return out.hidden_states[-1][torch.arange(ids.shape[0]), lengths]
+    return out.hidden_states[-1][torch.arange(ids.shape[0]), last_real_index(attn, _CRITIC_READOUT)]
 
 
 def _critic_hidden_nograd(model, tokenizer, texts: list[str], device: str) -> torch.Tensor:
@@ -252,6 +255,9 @@ def main() -> None:
     p.add_argument("--w-sum", type=float, default=1.0)
     p.add_argument("--w-comp", type=float, default=0.25)
     p.add_argument("--log-reward", action="store_true", help="reward = -log(loss) instead of -loss")
+    p.add_argument("--critic-readout", choices=["last", "legacy"], default="last",
+                   help="token the AR reads out: 'last' = last attended token (correct); 'legacy' = attn.sum-1, which is "
+                        "wrong for the left-padded batches used here (reproduces runs before 2026-10-11)")
     p.add_argument("--split-av", action="store_true",
                    help="split AV (nla/hrm/split_av.py): each rollout pair is TWO calls, one with only z_L (z_H zeroed) "
                         "writing the L field and one with only z_H writing the H field; the AV checkpoint must come from "
@@ -277,8 +283,12 @@ def main() -> None:
     baseline = json.load(open(norm_path))["mean_mse"] if Path(norm_path).exists() else None
     print(f"[train_rl] FVE baseline: {norm_path if baseline else 'none (no norm_stats.json — FVE not logged)'}")
     Path(args.output).mkdir(parents=True, exist_ok=True)
-    global _MICRO_BATCH
+    global _MICRO_BATCH, _CRITIC_READOUT
     _MICRO_BATCH = args.micro_batch_size
+    _CRITIC_READOUT = args.critic_readout
+    if args.critic_readout == "legacy":
+        print("[train_rl] WARNING: --critic-readout legacy: the AR reads a misaligned token for padded rows (reproduces "
+              "runs before 2026-10-11 only)")
 
     model, tokenizer = load_verbalizer(verbalizer_model, device=args.device, torch_dtype=dtype)
     d_verb = model.config.hidden_size

@@ -166,6 +166,19 @@ def build_inputs_embeds(
     return embeds
 
 
+def last_real_index(attn: torch.Tensor, readout: str = "last") -> torch.Tensor:
+    """Index of the token the AR reads out, per row. "last": the last attended token, correct for LEFT and RIGHT padding.
+    "legacy": attn.sum - 1, which is only correct for right padding; with a left-padded batch (the tokenizer is switched to
+    left padding for generation in eval.py / train_rl.py) it points into the padding or the middle of the text for every row
+    shorter than the longest one. All AR numbers logged before 2026-10-11 (RL rewards, the online AR update, eval FVE) used
+    the legacy readout; AR-SFT always used right padding (correct)."""
+    if readout == "legacy":
+        return attn.sum(dim=1) - 1
+    assert readout == "last", readout
+    pos = torch.arange(attn.shape[1], device=attn.device).unsqueeze(0)
+    return (attn.long() * (pos + 1)).argmax(dim=1)
+
+
 def load_sft_adapter(model: PeftModel, ckpt_dir: str, adapter_name: str) -> None:
     """Load a `train_av_sft.py`/`train_ar_sft.py` checkpoint's LoRA weights
     INTO the model's existing `adapter_name` slot (`save_extra_modules`'s
