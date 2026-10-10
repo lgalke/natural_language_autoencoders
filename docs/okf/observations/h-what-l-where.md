@@ -45,6 +45,10 @@ Crude keyword rule (the source's genre word anywhere in the field), n=100 per sp
 
 After RL the dissociation is unchanged (interaction +0.540 vs +0.598 after SFT). Row-level: the H stream's reconstruction is +0.76 [+0.63, +0.90] higher when the H call names the right token, the L stream's +0.13 [+0.02, +0.24] higher when the L call states the genre, neither tied to the other call's fact (details and caveats in [experiments](/experiments.md)). So the reward points the same way as the probes, but the calls did not become better at the facts under RL; RL mostly moved both calls toward stock texts. SFT with identical programmatic targets is therefore the controlled place to read the stream difference, RL the place where reward-driven shaping would have to show.
 
+# Can a reward extract the near-chance facts? (E13, negative)
+
+Per-call exact-match reward for both facts (+0.5 each, both calls, 500 RL steps): the L call's token stays at 0.19 iid / 0.08 ood and the H call's position at chance (0.17 / 0.19), indistinguishable from the same RL without the bonus (E12) and inside the range of the four SFT runs; reconstruction and the judge unchanged. So the asymmetry is not an unrewarded behaviour: the verbalizer (small LoRA model, this data size) does not extract the token from z_L or the position from z_H even under a direct reward, although linear probes read them. Details in [experiments](/experiments.md); training-log check pending.
+
 # What would falsify or weaken it
 
 - (Replicate run 2026-10-09: the pattern is reproduced for the token on both splits and for the position on iid, not for the position on ood.)
