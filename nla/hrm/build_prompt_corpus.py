@@ -47,21 +47,24 @@ class SourceSpec:
     config: str | None
     split: str
     column: str
+    max_rows: int | None = None  # optional per-source cap (5th field), else --max-per-source
 
     @staticmethod
     def parse(spec: str) -> "SourceSpec":
         name, _, rest = spec.partition("=")
-        assert name and rest, f"--source must be 'name=hf_id[:config]:split:column', got {spec!r}"
+        assert name and rest, f"--source must be 'name=hf_id[:config]:split:column[:max_rows]', got {spec!r}"
         parts = rest.split(":")
-        assert len(parts) == 4, (
-            f"--source {spec!r}: expected hf_id[:config]:split:column (4 colon-separated "
+        assert len(parts) in (4, 5), (
+            f"--source {spec!r}: expected hf_id[:config]:split:column[:max_rows] (4 or 5 colon-separated "
             f"fields, empty config allowed), got {len(parts)} fields: {parts}"
         )
-        hf_id, config, split, column = parts
-        return SourceSpec(name=name, hf_id=hf_id, config=config or None, split=split, column=column)
+        hf_id, config, split, column = parts[:4]
+        max_rows = int(parts[4]) if len(parts) == 5 and parts[4] else None
+        return SourceSpec(name=name, hf_id=hf_id, config=config or None, split=split, column=column, max_rows=max_rows)
 
 
-def _rows_from_source(spec: SourceSpec, max_rows: int | None, seed: int) -> list[dict]:
+def _rows_from_source(spec: SourceSpec, max_rows: int | None, seed: int, config_in_doc_id: bool = False) -> list[dict]:
+    max_rows = spec.max_rows if spec.max_rows is not None else max_rows
     # Streaming + buffered shuffle: big sources (SimpleStories is ~2M rows) are
     # never fully downloaded, only ~max_rows (+ shuffle buffer) are read.
     ds = load_dataset(spec.hf_id, name=spec.config, split=spec.split, streaming=True)
@@ -79,7 +82,8 @@ def _rows_from_source(spec: SourceSpec, max_rows: int | None, seed: int) -> list
             "prompt": prompt.strip(),
             "dataset": spec.name,
             "world": f"{spec.name}:{i}",
-            "doc_id": f"{spec.hf_id}:{spec.split}:{i}",
+            # two sources of one Hub dataset (e.g. ARC-Easy / ARC-Challenge) would collide: add the config then
+            "doc_id": f"{spec.hf_id}:{spec.config}:{spec.split}:{i}" if config_in_doc_id else f"{spec.hf_id}:{spec.split}:{i}",
         })
     return rows
 
@@ -148,13 +152,14 @@ def main() -> None:
                     help="cap rows pulled per HF source (random subsample, keyed on --seed)")
     p.add_argument("--strict", action="store_true", help="fail on the first broken source instead of skipping it")
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--local-max-per-dataset", type=int, default=None,
-                   help="cap the rows per 'dataset' value of the local JSONL (seeded sample); --max-per-source only caps HF sources")
+    p.add_argument("--max-per-dataset", "--local-max-per-dataset", dest="max_per_dataset", type=int, default=None,
+                   help="final seeded cap on the rows per 'dataset' value over ALL sources (Hub and local); "
+                        "--max-per-source / the optional 5th field of --source cap a source before this")
     p.add_argument("--exclude-from", action="append", default=[],
-                   help="corpus JSONL whose prompts are removed from the local rows (whitespace-normalised exact match); "
+                   help="corpus JSONL whose prompts are removed from ALL rows (whitespace-normalised exact match); "
                         "use the v1 corpus.jsonl so the v2 training corpus does not contain the v1 eval prompts")
     p.add_argument("--drop-dataset", action="append", default=[],
-                   help="drop local rows of this 'dataset' value (repeatable), e.g. the held-out OOD source musr")
+                   help="drop rows of this 'dataset' value (repeatable), e.g. the held-out OOD source musr")
     p.add_argument("--output", required=True)
     args = p.parse_args()
 
@@ -162,10 +167,14 @@ def main() -> None:
     specs += [SourceSpec.parse(s) for s in args.source]
     assert specs or args.local_jsonl, "no sources: pass --source, or --local-jsonl, or drop --no-defaults"
 
+    hf_id_counts: dict[str, int] = {}
+    for spec in specs:
+        hf_id_counts[spec.hf_id] = hf_id_counts.get(spec.hf_id, 0) + 1
     all_rows: list[dict] = []
     for spec in specs:
         try:
-            rows = _rows_from_source(spec, args.max_per_source, args.seed)
+            rows = _rows_from_source(spec, args.max_per_source, args.seed,
+                                     config_in_doc_id=hf_id_counts[spec.hf_id] > 1)
         except Exception as e:  # noqa: BLE001 — one unreachable/misconfigured source shouldn't kill the run
             if args.strict:
                 raise
@@ -176,14 +185,15 @@ def main() -> None:
     for path in args.local_jsonl:
         rows = _rows_from_local_jsonl(path, args.local_jsonl_dataset_name)
         print(f"  local:{path}: {len(rows)} rows")
-        exclude = set()
-        for ex in args.exclude_from:
-            with open(ex) as f:
-                exclude |= {prompt_hash(json.loads(line)["prompt"]) for line in f if line.strip()}
-        if exclude or args.drop_dataset or args.local_max_per_dataset is not None:
-            rows, stats = filter_local_rows(rows, exclude, set(args.drop_dataset), args.local_max_per_dataset, args.seed)
-            print(f"    filters ({len(exclude)} excluded prompt hashes): {stats} -> {len(rows)} rows kept")
         all_rows += rows
+
+    exclude: set[str] = set()
+    for ex in args.exclude_from:
+        with open(ex) as f:
+            exclude |= {prompt_hash(json.loads(line)["prompt"]) for line in f if line.strip()}
+    if exclude or args.drop_dataset or args.max_per_dataset is not None:
+        all_rows, stats = filter_local_rows(all_rows, exclude, set(args.drop_dataset), args.max_per_dataset, args.seed)
+        print(f"  filters ({len(exclude)} excluded prompt hashes): {stats} -> {len(all_rows)} rows kept")
 
     doc_ids = [r["doc_id"] for r in all_rows]
     assert len(doc_ids) == len(set(doc_ids)), "doc_id collision across sources — rename a --source"

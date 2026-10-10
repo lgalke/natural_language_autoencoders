@@ -75,3 +75,7 @@ Indirect evidence already in hand: in the [token probe](/observations/token-prob
 # Decision needed before any of this
 
 Whether the research question requires item 2 (response positions). If it does, items 1 and 3 should be built in the same pass, to avoid collecting three versions of the data.
+
+# Update 2026-10-11: public-mix corpus v2 (HRMMix not accessible)
+
+The HRMMix pool lives in a workspace we cannot read, so v2 is assembled from public Hub datasets (verified through the Hub datasets-server API on 2026-10-11: ids, configs, splits and columns exist; `voidful/ProofWriter` is not accessible). `build_prompt_corpus` gained: an optional per-source cap as a 5th field of `--source` (`name=hf_id:config:split:column:MAX`), `--max-per-dataset` (final seeded cap over all sources), `--exclude-from` (drop prompts present in another corpus, e.g. the v1 `corpus.jsonl`: keeps the v1 eval prompts out of v2 training), `--drop-dataset` (e.g. the held-out `musr`), and unique doc ids when two sources share one Hub dataset (ARC-Easy / ARC-Challenge). Mix (about 42k prompts, caps in the command in the experiment log): math and reasoning (GSM8K, competition math, ARC, CommonsenseQA, SciQ, OpenBookQA, LogiQA, MBPP), instructions and chat (Alpaca, Dolly, No Robots, UltraChat), long text (CNN/DailyMail, XSum), stories (SimpleStories), Danish (dynaword) and GSM-Symbolic, so no source exceeds about 10% of the prompts (v1: two sources 73%). v2 is a separate dataset with its own splits; the v1 splits and checkpoints stay untouched.
