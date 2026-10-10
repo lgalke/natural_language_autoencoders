@@ -25,6 +25,12 @@ from nla.datagen._common import add_storage_args, make_storage
 from nla.hrm.sidecar import read_sidecar, write_sidecar
 
 
+def content_mask(positions: list[int], prompt_lens: list[int], drop_tail: int) -> list[bool]:
+    """True for rows OUTSIDE the last `drop_tail` tokens of their prompt (the shared chat-template tail, including the last
+    prompt position: one identical token per prompt, no content). drop_tail=0 keeps everything."""
+    return [p < n - drop_tail for p, n in zip(positions, prompt_lens, strict=True)]
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--base", required=True, help="base.parquet from stage0_hrm")
@@ -36,6 +42,10 @@ def main() -> None:
     p.add_argument("--eval-iid-frac", type=float, default=0.10)
     p.add_argument("--judge-frac", type=float, default=0.5,
                     help="fraction of (eval_iid ∪ eval_ood) rows written to the fixed judge subset")
+    p.add_argument("--drop-template-tail", type=int, default=0,
+                   help="drop the rows inside the last N prompt tokens (5 = the shared chat-template tail, which includes the "
+                        "last prompt position) from the TRAINING buckets av_sft / ar_sft / rl; eval_iid and eval_ood keep "
+                        "every row (v1 report: 28.6% of the rows sit in the tail and carry no content)")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--output-dir", required=True)
     add_storage_args(p)
@@ -82,6 +92,7 @@ def main() -> None:
         storage.ensure_parent(path)
     writers = {s: pq.ParquetWriter(storage.open_write(out_paths[s]), schema) for s in world_buckets}
     row_counts = {s: 0 for s in world_buckets}
+    dropped_tail = {s: 0 for s in ("av_sft", "ar_sft", "rl")}
 
     judge_rng = random.Random(args.seed + 1)
     judge_rows: list[pa.RecordBatch] = []
@@ -89,7 +100,13 @@ def main() -> None:
     for batch in pf.iter_batches(batch_size=65536):
         batch_worlds = batch.column("world").to_pylist()
         for stage, bucket in world_buckets.items():
-            mask = pa.array([w in bucket for w in batch_worlds], type=pa.bool_())
+            in_bucket = [w in bucket for w in batch_worlds]
+            if args.drop_template_tail and stage in ("av_sft", "ar_sft", "rl"):
+                keep = content_mask(batch.column("position").to_pylist(), batch.column("prompt_len").to_pylist(),
+                                    args.drop_template_tail)
+                dropped_tail[stage] += sum(b and not k for b, k in zip(in_bucket, keep, strict=True))
+                in_bucket = [b and k for b, k in zip(in_bucket, keep, strict=True)]
+            mask = pa.array(in_bucket, type=pa.bool_())
             subset = batch.filter(mask)
             if subset.num_rows == 0:
                 continue
@@ -129,7 +146,8 @@ def main() -> None:
             git_commit="",
         )
         write_sidecar(storage, out_paths[stage], sub_meta)
-        print(f"{stage}: {len(bucket)} worlds -> {row_counts[stage]} rows -> {out_paths[stage]}")
+        extra = f" ({dropped_tail[stage]} template-tail rows dropped)" if stage in dropped_tail and args.drop_template_tail else ""
+        print(f"{stage}: {len(bucket)} worlds -> {row_counts[stage]} rows -> {out_paths[stage]}{extra}")
     print(f"judge_subset: {n_judge} rows -> {judge_path} "
           f"(sampled from eval_iid + eval_ood at judge_frac={args.judge_frac})")
 
