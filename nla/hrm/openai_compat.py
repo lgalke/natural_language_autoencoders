@@ -32,6 +32,8 @@ def _key_from_env_file(name: str, path: str = ".env") -> str | None:
         return None
     for line in p.read_text().splitlines():
         line = line.strip()
+        if line.startswith("export "):  # shell-style .env line: `export NAME="value"`
+            line = line[len("export "):].lstrip()
         if line.startswith(name) and "=" in line and line.split("=", 1)[0].strip() == name:
             return line.split("=", 1)[1].strip().strip("'\"")
     return None
