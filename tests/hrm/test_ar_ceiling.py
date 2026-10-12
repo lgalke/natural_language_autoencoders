@@ -66,3 +66,10 @@ def test_ar_hats_reads_the_last_token_whatever_the_padding_side_and_legacy_misre
         assert zl[:, 0].tolist() == [3.0, 8.0]
     zl, _ = ar_hats(_Model(), _Tok(), _Heads(), tmpl, fl, fh, "cpu", "legacy", 2, "left")
     assert zl[0, 0].item() != 3.0     # the short row reads the wrong position under left padding
+
+
+def test_fit_scale_formula_recovers_the_scalar():
+    pred = torch.tensor([[1.0, 2.0], [3.0, 0.5]])
+    gold = 2.5 * pred
+    s = float((pred * gold).sum() / (pred * pred).sum())
+    assert abs(s - 2.5) < 1e-6

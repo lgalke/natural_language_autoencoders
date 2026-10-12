@@ -106,6 +106,12 @@ def main() -> None:
     p.add_argument("--dump", required=True)
     p.add_argument("--eval-parquet", nargs="+", required=True, help="split=eval.parquet (same files as the eval)")
     p.add_argument("--ar-ckpt", required=True)
+    p.add_argument("--av-ckpt", default=None,
+                   help="checkpoint dir for the (unused) av adapter slot; default: --ar-ckpt. Needed when --ar-ckpt is a "
+                        "train_ar_sft output (it has no av adapter): pass any RL / AV-SFT checkpoint here")
+    p.add_argument("--fit-scale", action="store_true",
+                   help="calibrate each stream's prediction by one least-squares scalar (fit on the evaluated rows) before the "
+                        "FVE: for an SFT-only AR, whose heads are trained on direction only and have no meaningful scale")
     p.add_argument("--norm-stats-json", default="norm_stats.json")
     p.add_argument("--verbalizer-model", default=DEFAULT_VERBALIZER)
     p.add_argument("--device", default=default_device())
@@ -132,7 +138,7 @@ def main() -> None:
     dtype = {"float32": torch.float32, "bfloat16": torch.bfloat16}[args.dtype]
     model, tokenizer = load_verbalizer(args.verbalizer_model, device=args.device, torch_dtype=dtype)
     d_verb = model.config.hidden_size
-    _, _, heads = load_rl_checkpoint(model, args.ar_ckpt, args.ar_ckpt, 1536, d_verb, args.device)
+    _, _, heads = load_rl_checkpoint(model, args.av_ckpt or args.ar_ckpt, args.ar_ckpt, 1536, d_verb, args.device)
     model.eval()
 
     g = [gold[(r["split"], r["context_marked"])] for r in rows]
@@ -153,6 +159,11 @@ def main() -> None:
         fl = [make_variant(kind, r["L_field"], tt, tp) for r, tt, tp in zip(rows, true_tok, true_pos, strict=True)]
         fh = [make_variant(kind, r["H_field"], tt, tp) for r, tt, tp in zip(rows, true_tok, true_pos, strict=True)]
         zl, zh = ar_hats(model, tokenizer, heads, critic_template, fl, fh, args.device, readout, args.batch_size, side)
+        if args.fit_scale:
+            sl = float((zl * gold_l).sum() / (zl * zl).sum())
+            sh = float((zh * gold_h).sum() / (zh * zh).sum())
+            zl, zh = zl * sl, zh * sh
+            print(f"  {label}: fitted scales L {sl:.3f} H {sh:.3f}", flush=True)
         fve[label] = row_fve(zl, zh, gold_l, gold_h, weights, mean_mse)
         print(f"  done {label}", flush=True)
 
