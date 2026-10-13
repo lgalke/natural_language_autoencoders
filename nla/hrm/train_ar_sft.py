@@ -58,6 +58,9 @@ def main() -> None:
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--head-init-scale", type=float, default=0.02)
     p.add_argument("--log-every", type=int, default=20)
+    p.add_argument("--init-from", default=None,
+                   help="continue from an earlier train_ar_sft checkpoint dir (ar adapter + heads): e.g. stage 2 (teacher "
+                        "prose) after a facts-only stage 1 on many more rows; --head-init-scale is then ignored")
     p.add_argument("--output", required=True, help="output dir: adapter + extra_modules.safetensors")
     args = p.parse_args()
 
@@ -69,6 +72,14 @@ def main() -> None:
     tokenizer.padding_side = "right"
     d_mimir = 1536  # Mimir's hidden_size — fixed, not re-derived per run
     heads = ReconHeads(d_mimir, model.config.hidden_size, init_scale=args.head_init_scale).to(args.device)
+    if args.init_from:
+        from nla.hrm.model import InjectionAdapter, load_extra_modules, load_sft_adapter
+        load_sft_adapter(model, args.init_from, "ar")
+        d_verb = model.config.hidden_size
+        load_extra_modules(f"{args.init_from}/extra_modules.safetensors", InjectionAdapter(d_mimir, d_verb),
+                           InjectionAdapter(d_mimir, d_verb), heads)
+        heads.to(args.device)
+        print(f"[train_ar_sft] initialised the ar adapter and the heads from {args.init_from}")
 
     # Only the 'ar' adapter + heads train here — freeze 'av' explicitly (belt
     # and suspenders; PEFT doesn't auto-freeze inactive adapters).
