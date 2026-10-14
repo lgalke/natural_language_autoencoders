@@ -72,7 +72,7 @@ def make_variant(name: str, text: str, true_token: str, true_pos: str) -> str:
 
 @torch.no_grad()
 def ar_hats(model, tokenizer, heads, critic_template, fields_l, fields_h, device, readout="last", batch_rows=16,
-            padding_side="right"):
+            padding_side="right", hidden_fn=None):
     """AR predictions (zL_hat, zH_hat) [N, d] for lists of L and H field texts, in batches of `batch_rows` rows (L and H
     texts of a batch are tokenized together, as in eval.py)."""
     model.set_adapter("ar")
@@ -84,8 +84,11 @@ def ar_hats(model, tokenizer, heads, critic_template, fields_l, fields_h, device
         enc = tokenizer(l_texts + h_texts, return_tensors="pt", padding=True, add_special_tokens=False,
                         truncation=True, max_length=512)
         ids, attn = enc["input_ids"].to(device), enc["attention_mask"].to(device)
-        out = model(input_ids=ids, attention_mask=attn, output_hidden_states=True, logits_to_keep=1)
-        h = out.hidden_states[-1][torch.arange(ids.shape[0]), last_real_index(attn, readout)]
+        if hidden_fn is not None:
+            h = hidden_fn(model, ids, attn, readout)
+        else:
+            out = model(input_ids=ids, attention_mask=attn, output_hidden_states=True, logits_to_keep=1)
+            h = out.hidden_states[-1][torch.arange(ids.shape[0]), last_real_index(attn, readout)]
         n = len(l_texts)
         out_l.append(heads.forward_L(h[:n]).float().cpu())
         out_h.append(heads.forward_H(h[n:]).float().cpu())
@@ -114,6 +117,9 @@ def main() -> None:
                         "FVE: for an SFT-only AR, whose heads are trained on direction only and have no meaningful scale")
     p.add_argument("--norm-stats-json", default="norm_stats.json")
     p.add_argument("--verbalizer-model", default=DEFAULT_VERBALIZER)
+    p.add_argument("--backbone", choices=["verbalizer", "mimir"], default="verbalizer",
+                   help="mimir: --ar-ckpt is a `train_ar_sft --backbone mimir` output (no --av-ckpt needed; --verbalizer-model "
+                        "then names the Mimir checkpoint, default nla.hrm.mimir.DEFAULT_MIMIR)")
     p.add_argument("--device", default=default_device())
     p.add_argument("--dtype", choices=["float32", "bfloat16"], default=default_dtype())
     p.add_argument("--batch-size", type=int, default=16, help="rows per AR batch (the eval's --batch-size, for gen_legacy)")
@@ -136,9 +142,18 @@ def main() -> None:
     print(f"{len(rows)} dump rows matched to the eval parquets; position facts in the dump: {has_pos}")
 
     dtype = {"float32": torch.float32, "bfloat16": torch.bfloat16}[args.dtype]
-    model, tokenizer = load_verbalizer(args.verbalizer_model, device=args.device, torch_dtype=dtype)
-    d_verb = model.config.hidden_size
-    _, _, heads = load_rl_checkpoint(model, args.av_ckpt or args.ar_ckpt, args.ar_ckpt, 1536, d_verb, args.device)
+    hidden_fn = None
+    if args.backbone == "mimir":
+        from nla.hrm.mimir import DEFAULT_MIMIR
+        from nla.hrm.mimir_ar import load_mimir_ar, load_mimir_ar_checkpoint, mimir_ar_hidden
+        model, tokenizer = load_mimir_ar(DEFAULT_MIMIR if args.verbalizer_model == DEFAULT_VERBALIZER else args.verbalizer_model,
+                                         device=args.device, torch_dtype=dtype)
+        heads = load_mimir_ar_checkpoint(model, args.ar_ckpt, 1536, args.device)
+        hidden_fn = mimir_ar_hidden
+    else:
+        model, tokenizer = load_verbalizer(args.verbalizer_model, device=args.device, torch_dtype=dtype)
+        d_verb = model.config.hidden_size
+        _, _, heads = load_rl_checkpoint(model, args.av_ckpt or args.ar_ckpt, args.ar_ckpt, 1536, d_verb, args.device)
     model.eval()
 
     g = [gold[(r["split"], r["context_marked"])] for r in rows]
@@ -158,7 +173,8 @@ def main() -> None:
     for label, kind, readout, side in variants:
         fl = [make_variant(kind, r["L_field"], tt, tp) for r, tt, tp in zip(rows, true_tok, true_pos, strict=True)]
         fh = [make_variant(kind, r["H_field"], tt, tp) for r, tt, tp in zip(rows, true_tok, true_pos, strict=True)]
-        zl, zh = ar_hats(model, tokenizer, heads, critic_template, fl, fh, args.device, readout, args.batch_size, side)
+        zl, zh = ar_hats(model, tokenizer, heads, critic_template, fl, fh, args.device, readout, args.batch_size, side,
+                         hidden_fn)
         if args.fit_scale:
             sl = float((zl * gold_l).sum() / (zl * zl).sum())
             sh = float((zh * gold_h).sum() / (zh * zh).sum())

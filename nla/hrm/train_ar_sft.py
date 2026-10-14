@@ -50,7 +50,11 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--train-parquet", required=True)
     p.add_argument("--eval-parquet", default=None)
-    p.add_argument("--verbalizer-model", default=None, help="defaults to nla.hrm.model.DEFAULT_VERBALIZER")
+    p.add_argument("--verbalizer-model", default=None, help="defaults to nla.hrm.model.DEFAULT_VERBALIZER "
+                   "(or nla.hrm.mimir.DEFAULT_MIMIR with --backbone mimir)")
+    p.add_argument("--backbone", choices=["verbalizer", "mimir"], default="verbalizer",
+                   help="reconstructor backbone: the (Qwen) verbalizer model, or a LoRA copy of Mimir itself "
+                        "(nla/hrm/mimir_ar.py; bidirectional over the text, final H output at the last token)")
     p.add_argument("--device", default=default_device())
     p.add_argument("--dtype", choices=["float32", "bfloat16"], default=default_dtype())
     p.add_argument("--batch-size", type=int, default=16)
@@ -68,7 +72,12 @@ def main() -> None:
     verbalizer_model = args.verbalizer_model or DEFAULT_VERBALIZER
     dtype = {"float32": torch.float32, "bfloat16": torch.bfloat16}[args.dtype]
 
-    model, tokenizer = load_verbalizer(verbalizer_model, device=args.device, torch_dtype=dtype)
+    if args.backbone == "mimir":
+        from nla.hrm.mimir import DEFAULT_MIMIR
+        from nla.hrm.mimir_ar import load_mimir_ar
+        model, tokenizer = load_mimir_ar(args.verbalizer_model or DEFAULT_MIMIR, device=args.device, torch_dtype=dtype)
+    else:
+        model, tokenizer = load_verbalizer(verbalizer_model, device=args.device, torch_dtype=dtype)
     tokenizer.padding_side = "right"
     d_mimir = 1536  # Mimir's hidden_size — fixed, not re-derived per run
     heads = ReconHeads(d_mimir, model.config.hidden_size, init_scale=args.head_init_scale).to(args.device)
@@ -101,10 +110,14 @@ def main() -> None:
     model.train()
     for epoch in range(args.epochs):
         for input_ids, attn, targets, heads_batch in tqdm(loader, desc=f"epoch {epoch}"):
-            out = model(input_ids=input_ids, attention_mask=attn, output_hidden_states=True, logits_to_keep=1)
-            h_last_all = out.hidden_states[-1]
-            lengths = attn.sum(dim=1) - 1  # last real token index per row
-            h_last = h_last_all[torch.arange(h_last_all.shape[0]), lengths]
+            if args.backbone == "mimir":
+                from nla.hrm.mimir_ar import mimir_ar_hidden
+                h_last = mimir_ar_hidden(model, input_ids, attn)
+            else:
+                out = model(input_ids=input_ids, attention_mask=attn, output_hidden_states=True, logits_to_keep=1)
+                h_last_all = out.hidden_states[-1]
+                lengths = attn.sum(dim=1) - 1  # last real token index per row
+                h_last = h_last_all[torch.arange(h_last_all.shape[0]), lengths]
 
             preds = torch.stack([
                 heads.forward_L(h) if hd == "L" else heads.forward_H(h)
