@@ -12,7 +12,8 @@ buckets and in `norm_stats`). FVE is scored
 exactly as `eval`/`baselines` do (against the train-mean predictor, norm_stats' definition). Nested feature sets:
 
   dataset, +last, +token, +neighbours (previous/next token), +position (relative fifths/20ths + absolute), +length,
-  +bigrams (token with its previous / next token), +bag (hashed bag of ALL prompt tokens: an upper bound for "topic")
+  +bigrams (token with its previous / next token), +bag (hashed bag of ALL prompt tokens: an upper bound for "topic"),
+  +trigrams (previous two tokens; previous+next), +window (hashed bag of the tokens within +-8 positions), +all
 and two stand-alone sets, `token` and `position`, that split the main effect.
 
 Reading: a description made of the features in a set cannot beat that set's FVE (up to the capacity of an additive table
@@ -41,7 +42,13 @@ SETS: dict[str, list[str]] = {
     "+length": ["ds", "last", "tok", "prev", "next", "pos20", "abspos", "lenb"],
     "+bigrams": ["ds", "last", "tok", "prev", "next", "pos20", "abspos", "lenb", "bi_prev", "bi_next"],
     "+bag": ["ds", "last", "tok", "prev", "next", "pos20", "abspos", "lenb", "bi_prev", "bi_next", "bag"],
+    "+trigrams": ["ds", "last", "tok", "prev", "next", "pos20", "abspos", "lenb", "bi_prev", "bi_next", "tri_prev", "tri_mid"],
+    "+window": ["ds", "last", "tok", "prev", "next", "pos20", "abspos", "lenb", "bi_prev", "bi_next", "tri_prev", "tri_mid",
+                "win"],
+    "+all": ["ds", "last", "tok", "prev", "next", "pos20", "abspos", "lenb", "bi_prev", "bi_next", "tri_prev", "tri_mid",
+             "win", "bag"],
 }
+BAG_NAMES = ("bag", "win")
 _BAG_BUCKETS = 20011
 _BAG_CAP = 128
 
@@ -60,24 +67,25 @@ def fve_from(pred_l, pred_h, gold_l, gold_h, base) -> tuple[float, float, float]
     return float(1 - mse_s / base["sum"]), float(1 - mse_l / base["L"]), float(1 - mse_h / base["H"])
 
 
-def _design(cols: dict[str, np.ndarray], bag: np.ndarray | None, names: list[str], idx: np.ndarray, offsets: dict[str, int],
-            n_cols: int, device: str):
+def _design(cols: dict[str, np.ndarray], bags: dict[str, np.ndarray], names: list[str], idx: np.ndarray,
+            offsets: dict[str, int], n_cols: int, device: str):
     """Sparse one-hot design matrix (CSR) and its transpose for the rows `idx`; the bag columns carry weight 1/|bag|."""
     rows, cidx, vals = [], [], []
     r = np.arange(len(idx))
     for n in names:
-        if n == "bag":
+        if n in BAG_NAMES:
             continue
         rows.append(r)
         cidx.append(cols[n][idx] + offsets[n])
         vals.append(np.ones(len(idx), np.float32))
-    if "bag" in names and bag is not None:
-        b = bag[idx]
-        rr, cc = np.nonzero(b)
-        w = 1.0 / np.maximum((b > 0).sum(1), 1).astype(np.float32)
-        rows.append(rr)
-        cidx.append(b[rr, cc].astype(np.int64) + offsets["bag"])
-        vals.append(w[rr])
+    for n in names:
+        if n in BAG_NAMES:
+            b = bags[n][idx]
+            rr, cc = np.nonzero(b)
+            w = 1.0 / np.maximum((b > 0).sum(1), 1).astype(np.float32)
+            rows.append(rr)
+            cidx.append(b[rr, cc].astype(np.int64) + offsets[n])
+            vals.append(w[rr])
     coo = torch.sparse_coo_tensor(torch.as_tensor(np.stack([np.concatenate(rows), np.concatenate(cidx)])),
                                   torch.as_tensor(np.concatenate(vals)), (len(idx), n_cols)).coalesce()
     return coo.to(device), coo.t().coalesce().to(device)
@@ -103,18 +111,18 @@ def ridge_cg(a, at, y: torch.Tensor, lam: float, iters: int = 200, tol: float = 
     return w
 
 
-def fit_set(cols: dict[str, np.ndarray], bag: np.ndarray | None, coords: np.ndarray, train_idx: np.ndarray,
+def fit_set(cols: dict[str, np.ndarray], bags: dict[str, np.ndarray], coords: np.ndarray, train_idx: np.ndarray,
             val_idx: np.ndarray, names: list[str], device: str, lams: tuple[float, ...] = (1.0, 10.0, 100.0), iters: int = 200):
     """Additive table = ridge regression of the PC coordinates on one-hot features, solved exactly (CG); the ridge strength
     is picked on held-out DOCUMENTS (`val_idx`). Returns predict(idx) -> PC coordinates."""
     offsets, n_cols = {}, 0
     for n in names:
         offsets[n] = n_cols
-        n_cols += _BAG_BUCKETS if n == "bag" else int(cols[n].max()) + 1
+        n_cols += _BAG_BUCKETS if n in BAG_NAMES else int(cols[n].max()) + 1
     y = torch.tensor(coords, dtype=torch.float32)
     mu = y[torch.as_tensor(train_idx)].mean(0)
-    a_tr, at_tr = _design(cols, bag, names, train_idx, offsets, n_cols, device)
-    a_va, _ = _design(cols, bag, names, val_idx, offsets, n_cols, device)
+    a_tr, at_tr = _design(cols, bags, names, train_idx, offsets, n_cols, device)
+    a_va, _ = _design(cols, bags, names, val_idx, offsets, n_cols, device)
     y_tr, y_va = (y[torch.as_tensor(train_idx)] - mu).to(device), (y[torch.as_tensor(val_idx)] - mu).to(device)
     best, best_w = float("inf"), None
     for lam in lams:
@@ -125,13 +133,13 @@ def fit_set(cols: dict[str, np.ndarray], bag: np.ndarray | None, coords: np.ndar
     print(f"    ridge: val loss {best:.4f} (train-mean predictor {float((y_va ** 2).sum(1).mean()):.4f})", flush=True)
 
     def predict(idx_np: np.ndarray) -> np.ndarray:
-        a, _ = _design(cols, bag, names, idx_np, offsets, n_cols, device)
+        a, _ = _design(cols, bags, names, idx_np, offsets, n_cols, device)
         return (torch.sparse.mm(a, best_w).cpu() + mu).numpy()
 
     return predict
 
 
-def run_ladder(cols, bag, z, d, train_idx, val_idx, eval_sets: dict[str, np.ndarray], base, sets, pcs, device, **fit_kw):
+def run_ladder(cols, bags, z, d, train_idx, val_idx, eval_sets: dict[str, np.ndarray], base, sets, pcs, device, **fit_kw):
     """z: [N, 2d] shared-normalised (z_L, z_H). Returns {set: {split: {subset: [sum, L, H]}}} plus the PCA ceiling."""
     mean = z[train_idx].mean(0)
     xc = torch.tensor(z[train_idx] - mean, dtype=torch.float32)
@@ -154,7 +162,7 @@ def run_ladder(cols, bag, z, d, train_idx, val_idx, eval_sets: dict[str, np.ndar
 
     add("pca ceiling", lambda idx: (z[idx] - mean) @ pc @ pc.T + mean)
     for name in sets:
-        pred = fit_set(cols, bag, coords, train_idx, val_idx, SETS[name], device, **fit_kw)
+        pred = fit_set(cols, bags, coords, train_idx, val_idx, SETS[name], device, **fit_kw)
         add(name, lambda idx, p=pred: p(idx) @ pc.T + mean)
         print(f"  {name}: " + "  ".join(f"{sp} {results[name][sp]['all'][0]:+.3f}" for sp in eval_sets), flush=True)
     return results
@@ -163,16 +171,22 @@ def run_ladder(cols, bag, z, d, train_idx, val_idx, eval_sets: dict[str, np.ndar
 def build_features(prompt_ids: list[list[int]], position: list[int], dataset: list[str], is_last: list[bool],
                    doc_id: list[str]):
     n = len(position)
-    tok, prev, nxt = np.zeros(n, np.int64), np.zeros(n, np.int64), np.zeros(n, np.int64)
+    tok, prev, nxt, prev2 = (np.zeros(n, np.int64) for _ in range(4))
+    win = np.zeros((n, 17), dtype=np.int32)
     plen = np.array([len(x) for x in prompt_ids])
     for i, (ids, p) in enumerate(zip(prompt_ids, position, strict=True)):
         tok[i] = ids[p]
         prev[i] = ids[p - 1] if p > 0 else -1
         nxt[i] = ids[p + 1] if p + 1 < len(ids) else -1
+        prev2[i] = ids[p - 2] if p > 1 else -1
+        w = [ids[q] for q in range(max(0, p - 8), min(len(ids), p + 9))]
+        win[i, :len(w)] = np.asarray(w) % (_BAG_BUCKETS - 1) + 1
     pos = np.asarray(position)
     cols = {
         "tok": tok, "prev": prev, "next": nxt,
         "bi_prev": tok * 400000 + prev + 1, "bi_next": tok * 400000 + nxt + 1,
+        "tri_prev": (prev2 + 1) * 160000000000 + (prev + 1) * 400000 + tok,
+        "tri_mid": (prev + 1) * 160000000000 + tok * 400000 + nxt + 1,
         "pos20": np.minimum((20 * pos / plen).astype(np.int64), 19),
         "abspos": np.minimum(pos // 16, 63).astype(np.int64),
         "lenb": np.minimum(plen // 32, 63).astype(np.int64),
@@ -190,7 +204,7 @@ def build_features(prompt_ids: list[list[int]], position: list[int], dataset: li
             row[:min(len(u), _BAG_CAP)] = u[:_BAG_CAP]
             first[key] = row
         bag_rows[i] = first[key]
-    return cols, bag_rows
+    return cols, {"bag": bag_rows, "win": win}
 
 
 def main() -> None:
@@ -219,7 +233,7 @@ def main() -> None:
     z = np.concatenate([zl / c, zh / c], axis=1)
     doc, pos = t.column("doc_id").to_pylist(), t.column("position").to_pylist()
     prompt_ids = t.column("prompt_ids").to_pylist()
-    cols, bag = build_features(prompt_ids, pos, t.column("dataset").to_pylist(),
+    cols, bags = build_features(prompt_ids, pos, t.column("dataset").to_pylist(),
                                t.column("is_last_prompt_pos").to_pylist(), doc)
     index = {(a, b): i for i, (a, b) in enumerate(zip(doc, pos, strict=True))}
 
@@ -244,8 +258,8 @@ def main() -> None:
         train_idx = rng.choice(train_idx, size=args.max_train, replace=False)
     print(f"train {len(train_idx)} rows, val {len(val_idx)} rows (held-out documents), eval {({k: len(v) for k, v in eval_sets.items()})}")
 
-    cols = {k: compact(v, train_idx) if k in ("tok", "prev", "next", "bi_prev", "bi_next") else v for k, v in cols.items()}
-    res = run_ladder(cols, bag, z, d, train_idx, val_idx, eval_sets, base_mse, args.sets, args.pcs, args.device)
+    cols = {k: compact(v, train_idx) if k in ("tok", "prev", "next", "bi_prev", "bi_next", "tri_prev", "tri_mid") else v for k, v in cols.items()}
+    res = run_ladder(cols, bags, z, d, train_idx, val_idx, eval_sets, base_mse, args.sets, args.pcs, args.device)
     json.dump(res, open(args.output, "w"), indent=1)
     for sp in eval_sets:
         for sub in ("all", "non-last"):
