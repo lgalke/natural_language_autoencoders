@@ -6,6 +6,8 @@ tags: [talk, qa, limitations]
 timestamp: 2026-10-09
 ---
 
+> **Update 2026-10-20 (E15, E19): the position half of this claim does not survive more data.** With 12x more rows and facts-only training (`av_split_facts_v2`, clean v2 evals, non-last rows) the H call states the position as well as the L call (iid 0.51 vs 0.49, ood 0.43 vs 0.41; chance 0.20), while the token asymmetry stays (H 0.80 vs L 0.39 iid; H 0.81 vs L 0.37 ood). Read the old double dissociation as a small-data effect. What is robust: z_H holds the token better (probe and verbalizer, four SFT runs, 12x data); z_L's token is data-hungry (probe 0.34 to 0.74, verbalizer L 0.09 to 0.39); position is available from both. Say "L is at most slightly better at position", not "L holds WHERE".
+
 Numbers are from [experiments](/experiments.md): n=87 (iid) / 88 (ood) non-last rows for the facts, n=100 per split for FVE and the judge, intervals are 95% over rows only. "Run" = an independent SFT run.
 
 # Is the finding real?
