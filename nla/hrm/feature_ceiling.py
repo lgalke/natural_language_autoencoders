@@ -6,7 +6,9 @@
 
 A lookup-table predictor sees ONLY the listed features of a row (never the vectors of the eval documents) and predicts the
 shared-normalised (z_L, z_H). It is an additive model: one learned embedding per feature value, summed, regressed onto the
-top principal components of the training vectors (ridge by weight decay, early-stopped on held-out DOCUMENTS). FVE is scored
+top principal components of the training vectors (ridge, solved exactly by block conjugate gradients, strength picked on held-out
+DOCUMENTS). Only CONTENT rows are used for training and scoring (outside the last 5 chat-template tokens, as in the v2 training
+buckets and in `norm_stats`). FVE is scored
 exactly as `eval`/`baselines` do (against the train-mean predictor, norm_stats' definition). Nested feature sets:
 
   dataset, +last, +token, +neighbours (previous/next token), +position (relative fifths/20ths + absolute), +length,
@@ -41,7 +43,7 @@ SETS: dict[str, list[str]] = {
     "+bag": ["ds", "last", "tok", "prev", "next", "pos20", "abspos", "lenb", "bi_prev", "bi_next", "bag"],
 }
 _BAG_BUCKETS = 20011
-_BAG_CAP = 256
+_BAG_CAP = 128
 
 
 def compact(col: np.ndarray, train_idx: np.ndarray, min_count: int = 3, max_cats: int = 30000) -> np.ndarray:
@@ -58,71 +60,74 @@ def fve_from(pred_l, pred_h, gold_l, gold_h, base) -> tuple[float, float, float]
     return float(1 - mse_s / base["sum"]), float(1 - mse_l / base["L"]), float(1 - mse_h / base["H"])
 
 
-class _Table(torch.nn.Module):
-    def __init__(self, sizes: dict[str, int], k: int, bag: bool, mean: torch.Tensor):
-        super().__init__()
-        self.emb = torch.nn.ModuleDict({n: torch.nn.Embedding(s, k) for n, s in sizes.items()})
-        for e in self.emb.values():
-            torch.nn.init.zeros_(e.weight)  # type: ignore[arg-type]
-        self.bag = torch.nn.Embedding(_BAG_BUCKETS, k) if bag else None
-        if self.bag is not None:
-            torch.nn.init.zeros_(self.bag.weight)
-        self.bias = torch.nn.Parameter(mean.clone())
+def _design(cols: dict[str, np.ndarray], bag: np.ndarray | None, names: list[str], idx: np.ndarray, offsets: dict[str, int],
+            n_cols: int, device: str):
+    """Sparse one-hot design matrix (CSR) and its transpose for the rows `idx`; the bag columns carry weight 1/|bag|."""
+    rows, cidx, vals = [], [], []
+    r = np.arange(len(idx))
+    for n in names:
+        if n == "bag":
+            continue
+        rows.append(r)
+        cidx.append(cols[n][idx] + offsets[n])
+        vals.append(np.ones(len(idx), np.float32))
+    if "bag" in names and bag is not None:
+        b = bag[idx]
+        rr, cc = np.nonzero(b)
+        w = 1.0 / np.maximum((b > 0).sum(1), 1).astype(np.float32)
+        rows.append(rr)
+        cidx.append(b[rr, cc].astype(np.int64) + offsets["bag"])
+        vals.append(w[rr])
+    coo = torch.sparse_coo_tensor(torch.as_tensor(np.stack([np.concatenate(rows), np.concatenate(cidx)])),
+                                  torch.as_tensor(np.concatenate(vals)), (len(idx), n_cols)).coalesce()
+    return coo.to(device), coo.t().coalesce().to(device)
 
-    def forward(self, cols: dict[str, torch.Tensor], bag_ids: torch.Tensor | None) -> torch.Tensor:
-        out = self.bias.expand(next(iter(cols.values())).shape[0], -1)
-        for n, e in self.emb.items():
-            out = out + e(cols[n])
-        if self.bag is not None and bag_ids is not None:
-            mask = (bag_ids > 0).float().unsqueeze(-1)
-            out = out + (self.bag(bag_ids) * mask).sum(1) / mask.sum(1).clamp(min=1)
-        return out
+
+def ridge_cg(a, at, y: torch.Tensor, lam: float, iters: int = 200, tol: float = 1e-4) -> torch.Tensor:
+    """Solve (AtA + lam I) W = At Y for all columns of Y at once (block conjugate gradients, per-column step sizes)."""
+    w = torch.zeros(at.shape[0], y.shape[1], device=y.device)
+    rhs = torch.sparse.mm(at, y)
+    r = rhs.clone()
+    p = r.clone()
+    rs = (r * r).sum(0)
+    for _ in range(iters):
+        ap = torch.sparse.mm(at, torch.sparse.mm(a, p)) + lam * p
+        alpha = rs / (p * ap).sum(0).clamp(min=1e-20)
+        w += p * alpha
+        r -= ap * alpha
+        rs_new = (r * r).sum(0)
+        if float(rs_new.max().sqrt() / rhs.norm(dim=0).max().clamp(min=1e-20)) < tol:
+            break
+        p = r + p * (rs_new / rs.clamp(min=1e-20))
+        rs = rs_new
+    return w
 
 
 def fit_set(cols: dict[str, np.ndarray], bag: np.ndarray | None, coords: np.ndarray, train_idx: np.ndarray,
-            val_idx: np.ndarray, names: list[str], device: str, epochs: int = 12, lr: float = 1e-2, l2: float = 1e-4,
-            batch: int = 512, seed: int = 0):
-    """Fit the additive table on PC coordinates; keep the epoch with the lowest validation loss. Returns a predict function."""
-    g = torch.Generator().manual_seed(seed)
-    k = coords.shape[1]
+            val_idx: np.ndarray, names: list[str], device: str, lams: tuple[float, ...] = (1.0, 10.0, 100.0), iters: int = 200):
+    """Additive table = ridge regression of the PC coordinates on one-hot features, solved exactly (CG); the ridge strength
+    is picked on held-out DOCUMENTS (`val_idx`). Returns predict(idx) -> PC coordinates."""
+    offsets, n_cols = {}, 0
+    for n in names:
+        offsets[n] = n_cols
+        n_cols += _BAG_BUCKETS if n == "bag" else int(cols[n].max()) + 1
     y = torch.tensor(coords, dtype=torch.float32)
-    sizes = {n: int(cols[n].max()) + 1 for n in names if n != "bag"}
-    use_bag = "bag" in names
-    model = _Table(sizes, k, use_bag, y[torch.as_tensor(train_idx)].mean(0)).to(device)
-    ct = {n: torch.as_tensor(cols[n]) for n in sizes}
-    bt = torch.as_tensor(bag) if (use_bag and bag is not None) else None
-
-    def batch_in(idx: torch.Tensor):
-        return ({n: ct[n][idx].to(device) for n in ct}, bt[idx].to(device).long() if bt is not None else None)
+    mu = y[torch.as_tensor(train_idx)].mean(0)
+    a_tr, at_tr = _design(cols, bag, names, train_idx, offsets, n_cols, device)
+    a_va, _ = _design(cols, bag, names, val_idx, offsets, n_cols, device)
+    y_tr, y_va = (y[torch.as_tensor(train_idx)] - mu).to(device), (y[torch.as_tensor(val_idx)] - mu).to(device)
+    best, best_w = float("inf"), None
+    for lam in lams:
+        w = ridge_cg(a_tr, at_tr, y_tr, lam, iters)
+        v = float(((torch.sparse.mm(a_va, w) - y_va) ** 2).sum(1).mean())
+        if v < best:
+            best, best_w = v, w
+    print(f"    ridge: val loss {best:.4f} (train-mean predictor {float((y_va ** 2).sum(1).mean()):.4f})", flush=True)
 
     def predict(idx_np: np.ndarray) -> np.ndarray:
-        model.eval()
-        out = []
-        with torch.no_grad():
-            for s in range(0, len(idx_np), 4096):
-                idx = torch.as_tensor(idx_np[s:s + 4096])
-                out.append(model(*batch_in(idx)).cpu())
-        return torch.cat(out).numpy()
+        a, _ = _design(cols, bag, names, idx_np, offsets, n_cols, device)
+        return (torch.sparse.mm(a, best_w).cpu() + mu).numpy()
 
-    opt = torch.optim.Adam(model.parameters(), lr=lr)
-    tr = torch.as_tensor(train_idx)
-    best, best_state = float("inf"), {n: p.detach().clone() for n, p in model.state_dict().items()}
-    for _ in range(epochs):
-        model.train()
-        perm = tr[torch.randperm(len(tr), generator=g)]
-        for s in range(0, len(perm), batch):
-            idx = perm[s:s + batch]
-            inputs = batch_in(idx)
-            pred = model(*inputs)
-            reg = sum((model.emb[n](inputs[0][n]) ** 2).sum() for n in sizes) / len(idx)
-            loss = ((pred - y[idx].to(device)) ** 2).sum(1).mean() + l2 * reg
-            opt.zero_grad()
-            loss.backward()
-            opt.step()
-        v = float(((predict(val_idx) - y[torch.as_tensor(val_idx)].numpy()) ** 2).sum(1).mean())
-        if v < best:
-            best, best_state = v, {n: p.detach().clone() for n, p in model.state_dict().items()}
-    model.load_state_dict(best_state)
     return predict
 
 
@@ -195,8 +200,10 @@ def main() -> None:
     p.add_argument("--norm-stats-json", default="norm_stats.json")
     p.add_argument("--sets", nargs="+", default=list(SETS), choices=list(SETS))
     p.add_argument("--max-train", type=int, default=100000)
-    p.add_argument("--pcs", type=int, default=256)
-    p.add_argument("--epochs", type=int, default=12)
+    p.add_argument("--pcs", type=int, default=512)
+    p.add_argument("--tail", type=int, default=5,
+                   help="drop rows within the last TAIL prompt tokens (chat-template tail; the v2 training buckets dropped them "
+                        "and norm_stats is computed without them), from training AND evaluation")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--output", required=True)
@@ -211,7 +218,8 @@ def main() -> None:
     c = np.sqrt((zl**2).sum(-1, keepdims=True) + (zh**2).sum(-1, keepdims=True)).clip(1e-12)
     z = np.concatenate([zl / c, zh / c], axis=1)
     doc, pos = t.column("doc_id").to_pylist(), t.column("position").to_pylist()
-    cols, bag = build_features(t.column("prompt_ids").to_pylist(), pos, t.column("dataset").to_pylist(),
+    prompt_ids = t.column("prompt_ids").to_pylist()
+    cols, bag = build_features(prompt_ids, pos, t.column("dataset").to_pylist(),
                                t.column("is_last_prompt_pos").to_pylist(), doc)
     index = {(a, b): i for i, (a, b) in enumerate(zip(doc, pos, strict=True))}
 
@@ -223,7 +231,11 @@ def main() -> None:
         eval_keys |= {(r["doc_id"], r["position"]) for r in rows}
     eval_docs = {a for a, _ in eval_keys}
     rng = np.random.default_rng(args.seed)
-    train_all = np.array([i for i in range(n) if doc[i] not in eval_docs])
+    plen = np.array([len(x) for x in prompt_ids])
+    content = np.asarray(pos) < plen - args.tail
+    eval_sets = {k: v[content[v]] for k, v in eval_sets.items()}
+    print(f"content rows only (position < prompt_len - {args.tail}): eval {({k: len(v) for k, v in eval_sets.items()})}")
+    train_all = np.array([i for i in range(n) if doc[i] not in eval_docs and content[i]])
     docs_u = sorted({doc[i] for i in train_all})
     val_docs = set(rng.choice(docs_u, size=max(1, len(docs_u) // 20), replace=False).tolist())
     val_idx = np.array([i for i in train_all if doc[i] in val_docs])
@@ -233,8 +245,7 @@ def main() -> None:
     print(f"train {len(train_idx)} rows, val {len(val_idx)} rows (held-out documents), eval {({k: len(v) for k, v in eval_sets.items()})}")
 
     cols = {k: compact(v, train_idx) if k in ("tok", "prev", "next", "bi_prev", "bi_next") else v for k, v in cols.items()}
-    res = run_ladder(cols, bag, z, d, train_idx, val_idx, eval_sets, base_mse, args.sets, args.pcs, args.device,
-                     epochs=args.epochs, seed=args.seed)
+    res = run_ladder(cols, bag, z, d, train_idx, val_idx, eval_sets, base_mse, args.sets, args.pcs, args.device)
     json.dump(res, open(args.output, "w"), indent=1)
     for sp in eval_sets:
         for sub in ("all", "non-last"):
