@@ -22,7 +22,21 @@ import json
 import numpy as np
 
 METRICS_DUMP = ["fve_sum", "fve_L", "fve_H", "tok_first", "tok_L", "tok_H", "pos_L", "pos_H", "ground_span", "ground_name"]
-SUBSETS = ("all", "non-last")
+SUBSETS = ("all", "non-last", "content")
+TEMPLATE_TAIL = 5  # chat-template tokens at the end of every v2 prompt (`split --drop-template-tail 5`)
+
+
+def in_subset(r: dict, subset: str) -> bool:
+    """"non-last": not the last prompt position; "content": outside the last TEMPLATE_TAIL tokens of the prompt, i.e. the
+    distribution the v2 training buckets contain (tail rows were dropped from them, so they are out of distribution for the
+    models and their FVE against the train-bucket baseline is hugely negative)."""
+    if subset == "all":
+        return True
+    if subset == "non-last":
+        return not r.get("is_last_prompt_pos")
+    if "position" not in r or "prompt_len" not in r:  # dumps without positions (synthetic tests): no tail to drop
+        return True
+    return r["position"] < r["prompt_len"] - TEMPLATE_TAIL
 
 
 def load_dump(path: str) -> list[dict]:
@@ -79,13 +93,13 @@ def dump_results(rows: list[dict], n_boot: int, seed: int) -> dict:
     res: dict = {}
     for split in sorted({r["split"] for r in rows}):
         for subset in SUBSETS:
-            sel = [r for r in rows if r["split"] == split and (subset == "all" or not r.get("is_last_prompt_pos"))]
+            sel = [r for r in rows if r["split"] == split and in_subset(r, subset)]
             if not sel:
                 continue
             rng = np.random.default_rng(seed)
             arrays = row_arrays(sel)
             cell = {m: summarise(*arrays[m], rng, n_boot) for m in METRICS_DUMP}
-            if subset == "non-last" and arrays["pos_L"][1].sum() > 0:
+            if subset != "all" and arrays["pos_L"][1].sum() > 0:
                 cell["contrast"] = within_contrasts(arrays, len(sel), n_boot, seed)
             res.setdefault(split, {})[subset] = cell
     return res
@@ -114,7 +128,7 @@ def paired_results(rows_a: list[dict], rows_b: list[dict], n_boot: int, seed: in
             x["context_marked"] == y["context_marked"] for x, y in zip(a_rows, b_rows, strict=True)), (
             f"{split}: the two dumps are not row-aligned (use the same --limit and the same eval parquet)")
         for subset in SUBSETS:
-            keep = [i for i, r in enumerate(a_rows) if subset == "all" or not r.get("is_last_prompt_pos")]
+            keep = [i for i, r in enumerate(a_rows) if in_subset(r, subset)]
             aa, bb = row_arrays([a_rows[i] for i in keep]), row_arrays([b_rows[i] for i in keep])
             n = len(keep)
             rng = np.random.default_rng(seed)
