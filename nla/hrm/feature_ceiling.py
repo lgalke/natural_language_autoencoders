@@ -213,6 +213,9 @@ def main() -> None:
     p.add_argument("--eval", nargs="+", required=True, help="name=built_eval.parquet (their rows are held out of training)")
     p.add_argument("--norm-stats-json", default="norm_stats.json")
     p.add_argument("--sets", nargs="+", default=list(SETS), choices=list(SETS))
+    p.add_argument("--by-doc", action="store_true",
+                   help="evaluate on ALL base rows of the eval documents instead of the exact eval rows (automatic for "
+                        "single-vector bases from extract_hf_states)")
     p.add_argument("--max-train", type=int, default=100000)
     p.add_argument("--pcs", type=int, default=512)
     p.add_argument("--tail", type=int, default=5,
@@ -222,12 +225,16 @@ def main() -> None:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--output", required=True)
     args = p.parse_args()
-    base_mse = json.load(open(args.norm_stats_json))["mean_mse"]
-
-    t = pq.read_table(args.base, columns=["z_L", "z_H", "dataset", "doc_id", "position", "prompt_ids", "is_last_prompt_pos"])
+    single = "z" in pq.read_schema(args.base).names  # `extract_hf_states` output: one vector per row, no L/H split
+    meta_cols = ["dataset", "doc_id", "position", "prompt_ids", "is_last_prompt_pos"]
+    t = pq.read_table(args.base, columns=(["z"] if single else ["z_L", "z_H"]) + meta_cols)
     n = t.num_rows
-    zl = t.column("z_L").combine_chunks().flatten().to_numpy(zero_copy_only=False).astype(np.float32).reshape(n, -1)
-    zh = t.column("z_H").combine_chunks().flatten().to_numpy(zero_copy_only=False).astype(np.float32).reshape(n, -1)
+
+    def col(name: str) -> np.ndarray:
+        return t.column(name).combine_chunks().flatten().to_numpy(zero_copy_only=False).astype(np.float32).reshape(n, -1)
+
+    zl = col("z") if single else col("z_L")
+    zh = np.zeros_like(zl) if single else col("z_H")
     d = zl.shape[1]
     c = np.sqrt((zl**2).sum(-1, keepdims=True) + (zh**2).sum(-1, keepdims=True)).clip(1e-12)
     z = np.concatenate([zl / c, zh / c], axis=1)
@@ -237,13 +244,17 @@ def main() -> None:
                                t.column("is_last_prompt_pos").to_pylist(), doc)
     index = {(a, b): i for i, (a, b) in enumerate(zip(doc, pos, strict=True))}
 
-    eval_sets, eval_keys = {}, set()
+    eval_sets, eval_keys, eval_docs = {}, set(), set()
     for spec in args.eval:
         name, path = spec.split("=", 1)
         rows = pq.read_table(path, columns=["doc_id", "position"]).to_pylist()
-        eval_sets[name] = np.array([index[(r["doc_id"], r["position"])] for r in rows])
+        docs_here = {r["doc_id"] for r in rows}
+        if args.by_doc or single:  # all base rows of the eval documents (positions differ between tokenizers)
+            eval_sets[name] = np.array([i for i in range(n) if doc[i] in docs_here])
+        else:
+            eval_sets[name] = np.array([index[(r["doc_id"], r["position"])] for r in rows])
         eval_keys |= {(r["doc_id"], r["position"]) for r in rows}
-    eval_docs = {a for a, _ in eval_keys}
+        eval_docs |= docs_here
     rng = np.random.default_rng(args.seed)
     plen = np.array([len(x) for x in prompt_ids])
     content = np.asarray(pos) < plen - args.tail
@@ -257,6 +268,12 @@ def main() -> None:
     if len(train_idx) > args.max_train:
         train_idx = rng.choice(train_idx, size=args.max_train, replace=False)
     print(f"train {len(train_idx)} rows, val {len(val_idx)} rows (held-out documents), eval {({k: len(v) for k, v in eval_sets.items()})}")
+    if single:  # baseline = variance of the normalised vectors around the training mean (only the sum / L column is meaningful)
+        m = z[train_idx, :d].mean(0)
+        v = float(((z[train_idx, :d] - m) ** 2).mean())
+        base_mse = {"sum": v, "L": v, "H": 1.0}
+    else:
+        base_mse = json.load(open(args.norm_stats_json))["mean_mse"]
 
     cols = {k: compact(v, train_idx) if k in ("tok", "prev", "next", "bi_prev", "bi_next", "tri_prev", "tri_mid") else v for k, v in cols.items()}
     res = run_ladder(cols, bags, z, d, train_idx, val_idx, eval_sets, base_mse, args.sets, args.pcs, args.device)
